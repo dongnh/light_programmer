@@ -64,7 +64,7 @@ To optimize the spatial user experience, home lighting system requires distinct 
 
 * Descripion:
   
-  * 1. Sensor Logic
+  * **Sensor Logic**
   
     - The system continuously monitors the occupancy status from the sensors (motion_sensor_01 and presence_sensor_01).
     
@@ -76,7 +76,7 @@ To optimize the spatial user experience, home lighting system requires distinct 
       
     - Sensor devices utilize an event-driven mechanism for status updates to guarantee low latency.
   
-  * 2. Schedule and Interpolation Logic
+  * **Schedule and Interpolation Logic**
   
     - When the lights are in an active state, the system applies linear interpolation to accurately calculate the brightness level and color temperature at the current exact time, based on the two nearest time markers in the schedule.
     
