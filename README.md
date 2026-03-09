@@ -13,22 +13,22 @@ To optimize spatial user experience, home lighting systems require distinct prog
 * Example:
   ```json
   {
-  "id": "dev_kitchen_sink",
-  "note": "Sink area light, always active upon kitchen occupancy",
-  "schedule": [
-    { "time": "01:00", "level": 0, "kelvin": 2700 },
-    { "time": "06:00", "level": 0, "kelvin": 2700 },
-    { "time": "06:30", "level": 50, "kelvin": 4000 },
-    { "time": "08:30", "level": 100, "kelvin": 4000 },
-    { "time": "12:30", "level": 100, "kelvin": 4000 },
-    { "time": "18:30", "level": 100, "kelvin": 3000 },
-    { "time": "21:30", "level": 100, "kelvin": 2700 }
-  ],
-  "sensor": [
-    { "id": "kitchen_motion", "timeout": 5 },
-    { "id": "kitchen_presence", "timeout": 0 }
-  ]
-}
+    "id": "dev_kitchen_sink",
+    "note": "Sink area light, always active upon kitchen occupancy",
+    "schedule": [
+        { "time": "01:00", "level": 0, "kelvin": 2700 },
+        { "time": "06:00", "level": 0, "kelvin": 2700 },
+        { "time": "06:30", "level": 50, "kelvin": 4000 },
+        { "time": "08:30", "level": 100, "kelvin": 4000 },
+        { "time": "12:30", "level": 100, "kelvin": 4000 },
+        { "time": "18:30", "level": 100, "kelvin": 3000 },
+        { "time": "21:30", "level": 100, "kelvin": 2700 }
+    ],
+    "sensor": [
+        { "id": "kitchen_motion", "timeout": 5 },
+        { "id": "kitchen_presence", "timeout": 0 }
+    ]
+  }
   ```
 
 * Descripion:
