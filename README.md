@@ -52,11 +52,11 @@ To optimize the spatial user experience, home lighting system requires distinct 
     "sensor": [
       {
         "id": "kitchen_motion",
-        "timeout": 300
+        "timeout": 5
       },
       {
         "id": "kitchen_presence",
-        "timeout": 600
+        "timeout": 0
       }
     ]
   }
@@ -70,7 +70,7 @@ To optimize the spatial user experience, home lighting system requires distinct 
     
     - Upon detecting motion or presence (occupancy = 1), the system records the last trigger time.
     
-    - Based on the timeout field (300 seconds for motion or 600 seconds for presence), if the elapsed time since the last occupancy = 1 instance exceeds the timeout duration, the lights will execute an automatic shut-off.
+    - Based on the timeout field (5 minutes for motion or zero minute for presence), if the elapsed time since the last occupancy = 1 instance exceeds the timeout duration, the lights will execute an automatic shut-off.
     
     - If the elapsed time remains within the timeout window, the system maintains the active lighting state based on the schedule.
       
