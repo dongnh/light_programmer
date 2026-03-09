@@ -1,88 +1,57 @@
 # Home Lighting Programmer
 
-To optimize the spatial user experience, home lighting system requires distinct programming logic for each lighting component. 
-* **Decoration Lighting** employs static color and intensity parameters to establish a consistent visual baseline. 
-* **Utility Lighting** demands flawless, low latency interoperability with motion and presence sensors to ensure immediate functional responsiveness. 
-* **Ambient Lighting** utilizes dynamic color temperature and intensity shifts to simulate natural daylight and warm evening firelight, fostering a deeper connection to human circadian rhythms.
+To optimize spatial user experience, home lighting systems require distinct programming logic:
+
+- Decoration Lighting: Uses static color and intensity for a consistent visual baseline.
+
+- Utility Lighting: Requires low-latency sensor interoperability for immediate functional responsiveness.
+
+- Ambient Lighting: Uses dynamic color temperature and intensity shifts to simulate natural light, aligning with human circadian rhythms.
 
 ## Configuration
 
 * Example:
   ```json
   {
-    "id": "dev_kitchen_sink",
-    "note": "Sink area light, always active upon kitchen occupancy",
-    "schedule": [
-      {
-        "time": "01:00",
-        "level": 0,
-        "kelvin": 2700
-      },
-      {
-        "time": "06:00",
-        "level": 0,
-        "kelvin": 2700
-      },
-      {
-        "time": "06:30",
-        "level": 50,
-        "kelvin": 4000
-      },
-      {
-        "time": "08:30",
-        "level": 100,
-        "kelvin": 4000
-      },
-      {
-        "time": "12:30",
-        "level": 100,
-        "kelvin": 4000
-      },
-      {
-        "time": "18:30",
-        "level": 100,
-        "kelvin": 3000
-      },
-      {
-        "time": "21:30",
-        "level": 100,
-        "kelvin": 2700
-      }
-    ],
-    "sensor": [
-      {
-        "id": "kitchen_motion",
-        "timeout": 5
-      },
-      {
-        "id": "kitchen_presence",
-        "timeout": 0
-      }
-    ]
-  }
+  "id": "dev_kitchen_sink",
+  "note": "Sink area light, always active upon kitchen occupancy",
+  "schedule": [
+    { "time": "01:00", "level": 0, "kelvin": 2700 },
+    { "time": "06:00", "level": 0, "kelvin": 2700 },
+    { "time": "06:30", "level": 50, "kelvin": 4000 },
+    { "time": "08:30", "level": 100, "kelvin": 4000 },
+    { "time": "12:30", "level": 100, "kelvin": 4000 },
+    { "time": "18:30", "level": 100, "kelvin": 3000 },
+    { "time": "21:30", "level": 100, "kelvin": 2700 }
+  ],
+  "sensor": [
+    { "id": "kitchen_motion", "timeout": 5 },
+    { "id": "kitchen_presence", "timeout": 0 }
+  ]
+}
   ```
 
 * Descripion:
   
-  * **Sensor Logic**
+  * Sensor Logic
   
-    - The system continuously monitors the occupancy status from the sensors (motion_sensor_01 and presence_sensor_01).
-    
-    - Upon detecting motion or presence (occupancy = 1), the system records the last trigger time.
-    
-    - Based on the timeout field (5 minutes for motion or zero minute for presence), if the elapsed time since the last occupancy = 1 instance exceeds the timeout duration, the lights will execute an automatic shut-off.
-    
-    - If the elapsed time remains within the timeout window, the system maintains the active lighting state based on the schedule.
-      
-    - Sensor devices utilize an event-driven mechanism for status updates to guarantee low latency.
+    - Continuously monitors occupancy status from configured sensors.
+
+    - Records the timestamp upon detecting occupancy (occupancy = 1).
+
+    - Executes an automatic shut-off if the elapsed time since the last trigger exceeds the timeout duration (e.g., 5 minutes for motion, 0 minutes for presence).
+
+    - Maintains the scheduled active state while within the timeout window.
+
+    - Utilizes event-driven status updates to guarantee low latency.
   
-  * **Schedule and Interpolation Logic**
+  * Schedule and Interpolation Logic
   
-    - When the lights are in an active state, the system applies linear interpolation to accurately calculate the brightness level and color temperature at the current exact time, based on the two nearest time markers in the schedule.
-    
-    - Example: Between the 06:30 (level 50, kelvin 4000) and 08:30 (level 100, kelvin 4000) markers. If the sensor is triggered at 07:30 (the exact midpoint of the duration), the system will interpolate a level value of 75 and a kelvin value of 4000.
-    
-    - This mechanism ensures a seamless transition in lighting, optimizing for the user's circadian rhythm rather than executing an abrupt transition.
-      
-    - Brightness levels and color temperature will be updated at one-minute intervals.
+    - During active states, the system applies linear interpolation to calculate precise brightness and color temperature based on the two nearest scheduled time markers.
+
+    - Example: At 07:30, halfway between 06:30 (level 50, 4000K) and 08:30 (level 100, 4000K), the interpolated level is 75 at 4000K.
+
+    - Ensures seamless lighting transitions, optimizing circadian rhythm alignment without abrupt visual shifts.
+
+    - Brightness and color temperature values update at one-minute intervals.
   
