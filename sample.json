@@ -1,0 +1,151 @@
+[
+  {
+    "id": "dev_1_8",
+    "note": "Sink, bright when occupied, auto turn off after 5 mins",
+    "schedule": [
+      {"time": "01:00", "level": 50, "kelvin": 2700},
+      {"time": "06:00", "level": 50, "kelvin": 2700},
+      {"time": "08:30", "level": 100, "kelvin": 4000},      
+      {"time": "18:30", "level": 100, "kelvin": 4000},
+      {"time": "21:30", "level": 50, "kelvin": 2700}
+    ],
+    "sensor": [      
+      {"id": "dev_1_11", "name": "sensor.sink", "timeout": 5}
+    ]
+  },
+  {
+    "id": "dev_2080db17",
+    "note": "Sofa and Painting, only on at early night",
+    "schedule": [
+      {"time": "01:00", "level": 0},
+      {"time": "18:00", "level": 0},
+      {"time": "18:30", "level": 100},
+      {"time": "20:00", "level": 100},
+      {"time": "20:30", "level": 0}
+    ],
+    "sensor": [
+      {"id": "dev_1_3", "name": "sensor.balls", "timeout": 5}      
+    ]
+  },
+  {
+    "id": "dev_89ca97b6",
+    "note": "Bed Sideway, auto turn on when bedroom occupied at early night",
+    "schedule": [
+      {"time": "01:00", "level": 0},
+      {"time": "19:30", "level": 0},
+      {"time": "20:00", "level": 10},
+      {"time": "23:30", "level": 0}
+    ],
+    "sensor": [
+      {"id": "dev_1_9", "name": "sensor.bedroom", "timeout": 5}      
+    ]
+  },
+  {
+    "id": "dev_9ca63a65",
+    "note": "Bed Center, auto turn on when bedroom occupied at early night",
+    "schedule": [
+      {"time": "01:00", "level": 0},
+      {"time": "19:30", "level": 0},
+      {"time": "20:00", "level": 15},
+      {"time": "23:30", "level": 0}
+    ],
+    "sensor": [
+      {"id": "dev_1_3", "name": "sensor.bedroom", "timeout": 5}
+    ]
+  },
+  {
+    "id": "dev_5d90bf62",
+    "note": "Entry Hall, available all day, auto turn on when entry occupied",
+    "schedule": [
+      {"time": "00:00", "level": 100}
+    ],
+    "sensor": [      
+      {"id": "dev_1_10", "name": "sensor.entry", "timeout": 5},
+      {"id": "dev_1_3", "name": "sensor.balls", "timeout": 10}
+    ]
+  },
+  {
+    "id": "dev_9e61e8bb",
+    "note": "Balls, only on when occupied, auto turn off after 5 mins",
+    "schedule": [
+      {"time": "00:00", "level": 50}
+    ],
+    "sensor": [
+      {"id": "dev_1_3", "name": "sensor.balls", "timeout": 5}
+    ]
+  },
+  {
+    "id": "dev_130e2306",
+    "note": "Living Front",
+    "schedule": [
+      {"time": "01:00", "level": 0},
+      {"time": "17:00", "level": 0},
+      {"time": "17:30", "level": 100},
+      {"time": "21:00", "level": 100},
+      {"time": "21:30", "level": 0}
+    ],
+    "sensor": [
+      {"id": "dev_1_3", "name": "sensor.balls", "timeout": 5}
+    ]
+  },
+
+  {
+    "id": "dev_a2feaee2",
+    "note": "Bed Hallway",
+    "schedule": [
+      {"time": "01:00", "level": 0},
+      {"time": "16:45", "level": 0},
+      {"time": "17:00", "level": 20},            
+      {"time": "22:00", "level": 20},
+      {"time": "23:00", "level": 10},
+      {"time": "23:15", "level": 0}
+    ],    
+    "sensor": [      
+      {"id": "dev_1_9", "name": "sensor.bedroom", "timeout": 1}
+    ]
+  },
+
+  {
+    "id": "dev_d7b37112",    
+    "note": "Kitchen Hall, bright almost all day",    
+    "schedule": [
+      {"time": "01:00", "level": 0},
+      {"time": "10:00", "level": 0},
+      {"time": "10:30", "level": 100},
+      {"time": "22:00", "level": 100}
+    ],
+    
+    "sensor": [
+      {"id": "dev_1_3", "name": "sensor.balls", "timeout": 10},      
+      {"id": "dev_1_11", "name": "sensor.sink", "timeout": 10}
+    ]
+  },
+  
+  {
+    "id": "dev_717486b3",
+    "note": "Artificial skylight in office, sky.one",
+    "schedule": [
+      {"time": "01:00", "level": 0, "kelvin": 2700},
+      {"time": "05:30", "level": 0, "kelvin": 2700},
+      {"time": "06:00", "level": 50, "kelvin": 2700},
+      {"time": "07:00", "level": 100, "kelvin": 4000},      
+      {"time": "12:00", "level": 100, "kelvin": 5000},
+      {"time": "18:30", "level": 100, "kelvin": 2700},
+      {"time": "21:30", "level": 50, "kelvin": 2700}
+    ]
+  },
+
+  {
+    "id": "dev_2f630eb9",
+    "note": "Artificial skylight in office, sky.two",
+    "schedule": [
+      {"time": "01:00", "level": 0, "kelvin": 2700},
+      {"time": "05:30", "level": 0, "kelvin": 2700},
+      {"time": "06:00", "level": 50, "kelvin": 2700},
+      {"time": "07:00", "level": 100, "kelvin": 4000},      
+      {"time": "12:00", "level": 100, "kelvin": 5000},
+      {"time": "18:30", "level": 100, "kelvin": 2700},
+      {"time": "21:30", "level": 50, "kelvin": 2700}
+    ]
+  }
+]
