@@ -6,6 +6,7 @@ import argparse
 import logging
 import sys
 import urllib.request
+import queue
 from datetime import datetime, timedelta
 
 # Configure logging interface
@@ -18,6 +19,39 @@ logging.basicConfig(
 # Global registry for sensor telemetry
 sensor_last_occupied = {}
 
+class CommandDispatcher:
+    def __init__(self, rate_limit_delay: float = 1.0):
+        # Initialize thread-safe queue for command buffering
+        self.cmd_queue = queue.Queue()
+        # Delay in seconds between sequential command executions
+        self.rate_limit_delay = rate_limit_delay
+        
+        # Start background worker thread
+        self.worker_thread = threading.Thread(target=self._process_queue, daemon=True)
+        self.worker_thread.start()
+
+    def _process_queue(self):
+        while True:
+            # Block until a command is available in the queue
+            cmd = self.cmd_queue.get()
+            if cmd is None:
+                break
+            try:
+                subprocess.run(cmd, capture_output=True, text=True)
+            except Exception as e:
+                logging.error("Command execution failed: " + str(e))
+            finally:
+                self.cmd_queue.task_done()
+            
+            # Throttle execution to prevent server saturation
+            time.sleep(self.rate_limit_delay)
+
+    def enqueue_command(self, cmd: list):
+        self.cmd_queue.put(cmd)
+
+# Global instantiation of the command dispatcher with 1 second delay
+dispatcher = CommandDispatcher(rate_limit_delay=1.0)
+
 class MatterDevice:
     def __init__(self, config):
         self.node_id = config.get('node_id')
@@ -28,10 +62,15 @@ class MatterDevice:
     def _run_script(self, event_name, *args):
         if event_name not in self.events:
             raise ValueError("Event is not defined for this device.")
+        
         script = self.events[event_name]['script']
         cmd = ["python3", "-c", script] + [str(a) for a in args]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.stdout.strip()
+        
+        # Push command payload to the asynchronous dispatcher queue
+        dispatcher.enqueue_command(cmd)
+        
+        # Return a status indicator since execution is now deferred
+        return "Command queued"
 
 class LightDevice(MatterDevice):
     def turn_on(self): return self._run_script("turn_on")
