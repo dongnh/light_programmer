@@ -16,8 +16,8 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 
-# Global registry for sensor telemetry
-sensor_last_occupied = {}
+# Global registry for sensor telemetry and state tracking
+sensor_registry = {}
 
 class CommandDispatcher:
     def __init__(self, rate_limit_delay: float = 1.0):
@@ -172,9 +172,22 @@ def create_sensor_callback(sensor_id: str):
             
             logging.info("Sensor Stream [" + sensor_id + "]: " + str(payload))
             
-            # Update temporal state if motion is detected
+            # Fetch current state or initialize
+            current_state = sensor_registry.get(sensor_id, {"is_occupied": False, "last_cleared": datetime.min})
+            
+            # Update temporal state based on state transition
             if occupancy == 1:
-                sensor_last_occupied[sensor_id] = datetime.now()
+                current_state["is_occupied"] = True
+            elif occupancy == 0 and current_state["is_occupied"]:
+                # Transition from occupied to unoccupied starts the timeout
+                current_state["is_occupied"] = False
+                current_state["last_cleared"] = datetime.now()
+            elif occupancy == 0 and sensor_id not in sensor_registry:
+                # Initialization case for unpopulated sensors
+                current_state["is_occupied"] = False
+                current_state["last_cleared"] = datetime.min
+                
+            sensor_registry[sensor_id] = current_state
                 
         except json.JSONDecodeError:
             pass # Discard malformed packets silently
@@ -224,11 +237,17 @@ def run_automation(server: str, config_path: str):
                     for s in sensors:
                         s_id = s.get('id')
                         timeout_mins = s.get('timeout', 5)
-                        last_trigger = sensor_last_occupied.get(s_id, datetime.min)
                         
-                        if (now - last_trigger) <= timedelta(minutes=timeout_mins):
+                        sensor_data = sensor_registry.get(s_id, {"is_occupied": False, "last_cleared": datetime.min})
+                        
+                        if sensor_data["is_occupied"]:
                             is_occupied = True
                             break
+                        else:
+                            last_cleared = sensor_data["last_cleared"]
+                            if (now - last_cleared) <= timedelta(minutes=timeout_mins):
+                                is_occupied = True
+                                break
 
                 # Final Command Resolution
                 target_level = int(target_state.get('level', 0)) if is_occupied else 0

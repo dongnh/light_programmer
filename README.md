@@ -1,6 +1,6 @@
 # Home Lighting Programmer
 ## Project Goals
-This project provides ecosystem-agnostic control of smart home lighting. It eradicates the reliance on static physical switches, utilizing motion and presence sensors to achieve complete automation. The system dynamically supports human circadian rhythms to ensure optimal health and restorative sleep cycles for residents. Deployment is strictly restricted to indoor environments due to inherent security vulnerabilities.
+This project provides ecosystem-agnostic control of smart home lighting. It eradicates the reliance on static physical switches, utilizing motion and presence sensors to achieve complete automation. The system dynamically supports human circadian rhythms to ensure optimal health and restorative sleep cycles for residents. Deployment is strictly restricted to domestic environments due to inherent security vulnerabilities.
 
 ## Lighting Logic
 To optimize spatial user experience, the system applies distinct programming logic:
