@@ -5,6 +5,7 @@ import time
 import argparse
 import logging
 import sys
+import urllib.request
 from datetime import datetime, timedelta
 
 # Configure logging interface
@@ -61,9 +62,17 @@ class SensorDevice(MatterDevice):
         return listener_thread
 
 class MatterController:
-    def __init__(self, json_path: str):
-        with open(json_path, 'r', encoding='utf-8') as file:
-            data = json.load(file)
+    def __init__(self, server_address: str):
+        url = f"http://{server_address}/api/metadata"
+        logging.info("Fetching hardware metadata from: " + url)
+        try:
+            # Execute HTTP GET request to retrieve dynamic configuration
+            response = urllib.request.urlopen(url)
+            data = json.loads(response.read().decode('utf-8'))
+        except Exception as e:
+            logging.error("Failed to retrieve metadata: " + str(e))
+            sys.exit(1)
+
         self.devices = {}
         for dev_config in data.get('devices', []):
             hw_type = dev_config.get('hardware_type', '')
@@ -133,8 +142,8 @@ def create_sensor_callback(sensor_id: str):
             
     return callback
 
-def run_automation(data_path: str, config_path: str):
-    controller = MatterController(data_path)
+def run_automation(server: str, config_path: str):
+    controller = MatterController(server)
     with open(config_path, 'r', encoding='utf-8') as f:
         lighting_configs = json.load(f)
 
@@ -227,12 +236,12 @@ def run_automation(data_path: str, config_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Matter Automation Controller")
-    parser.add_argument("--data", required=True, help="Path to logical bridge JSON")
+    parser.add_argument("--server", required=True, help="Server IP and port (e.g., 192.168.1.220:8080)")
     parser.add_argument("--config", required=True, help="Path to schedule JSON")
     args = parser.parse_args()
     
     try:
-        run_automation(args.data, args.config)
+        run_automation(args.server, args.config)
     except KeyboardInterrupt:
         logging.info("System safely halted.")
         sys.exit(0)
