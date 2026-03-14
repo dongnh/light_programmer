@@ -22,7 +22,7 @@ sensor_registry = {}
 state_changed_event = threading.Event()
 
 class CommandDispatcher:
-    # Changed default rate limit to 0.0 for instant execution
+    # Default rate limit to 0.0 for instant execution
     def __init__(self, rate_limit_delay: float = 0.0):
         self.cmd_queue = queue.Queue()
         self.rate_limit_delay = rate_limit_delay
@@ -187,6 +187,43 @@ def create_sensor_callback(sensor_id: str):
             
     return callback
 
+def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bool:
+    # Base case: Empty node defaults to True
+    if not node:
+        return True
+
+    # Base case: Leaf node representing a physical sensor
+    if node.get('type') == 'sensor':
+        s_id = node.get('id')
+        timeout_mins = node.get('timeout', 5)
+        sensor_data = registry.get(s_id, {"is_occupied": False, "last_cleared": datetime.min})
+        
+        if sensor_data["is_occupied"]:
+            return True
+            
+        if (current_time - sensor_data["last_cleared"]) <= timedelta(minutes=timeout_mins):
+            return True
+            
+        return False
+
+    # Recursive case: Internal node representing a logical operator
+    operator = node.get('operator', '').upper()
+    operands = node.get('operands', [])
+
+    if operator == 'AND':
+        # Logical Conjunction
+        return all(evaluate_condition(child, registry, current_time) for child in operands)
+    elif operator == 'OR':
+        # Logical Disjunction
+        return any(evaluate_condition(child, registry, current_time) for child in operands)
+    elif operator == 'NOT':
+        # Logical Negation (applies to the first operand)
+        if operands:
+            return not evaluate_condition(operands[0], registry, current_time)
+        return True
+        
+    return False
+
 def run_automation(server: str, config_path: str):
     controller = MatterController(server)
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -220,26 +257,22 @@ def run_automation(server: str, config_path: str):
                 schedule = config.get('schedule', [])
                 target_state = calculate_current_state(schedule, current_minutes)
                 
-                sensors = config.get('sensor', [])
+                # Update: Evaluate occupancy using the recursive AST parser
+                sensor_cond = config.get('sensor_condition')
+                legacy_sensors = config.get('sensor', [])
                 is_occupied = False
                 
-                if not sensors:
-                    is_occupied = True
+                if sensor_cond:
+                    is_occupied = evaluate_condition(sensor_cond, sensor_registry, now)
+                elif legacy_sensors:
+                    # Fallback to logical OR for backward compatibility
+                    is_occupied = any(
+                        evaluate_condition({"type": "sensor", **s}, sensor_registry, now) 
+                        for s in legacy_sensors
+                    )
                 else:
-                    for s in sensors:
-                        s_id = s.get('id')
-                        timeout_mins = s.get('timeout', 5)
-                        
-                        sensor_data = sensor_registry.get(s_id, {"is_occupied": False, "last_cleared": datetime.min})
-                        
-                        if sensor_data["is_occupied"]:
-                            is_occupied = True
-                            break
-                        else:
-                            last_cleared = sensor_data["last_cleared"]
-                            if (now - last_cleared) <= timedelta(minutes=timeout_mins):
-                                is_occupied = True
-                                break
+                    # Default to occupied if no sensor configuration is provided
+                    is_occupied = True
 
                 target_level = int(target_state.get('level', 0)) if is_occupied else 0
                 target_on = target_level > 0

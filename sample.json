@@ -1,7 +1,7 @@
 [
   {
     "id": "dev_1_8",
-    "note": "Sink, bright when occupied, auto turn off after 5 mins",
+    "note": "Sink; bright when occupied, automatically turns off after 5 minutes.",
     "schedule": [
       {"time": "01:00", "level": 50, "kelvin": 2700},
       {"time": "06:00", "level": 50, "kelvin": 2700},
@@ -15,7 +15,7 @@
   },
   {
     "id": "dev_2080db17",
-    "note": "Sofa and Painting, only on at early night",
+    "note": "Sofa and Painting; only on during early evening.",
     "schedule": [
       {"time": "01:00", "level": 0},
       {"time": "18:00", "level": 0},
@@ -23,13 +23,30 @@
       {"time": "20:00", "level": 100},
       {"time": "20:30", "level": 0}
     ],
-    "sensor": [
-      {"id": "dev_1_3", "name": "sensor.balls", "timeout": 5}      
-    ]
+    "sensor_condition": {
+      "operator": "AND",
+      "operands": [
+        {
+          "type": "sensor",
+          "id": "dev_1_3",
+          "timeout": 5
+        },
+        {
+          "operator": "NOT",
+          "operands": [
+            {
+              "type": "sensor",
+              "id": "dev_1_15",
+              "timeout": 1
+            }
+          ]
+        }
+      ]
+    }
   },
   {
     "id": "dev_89ca97b6",
-    "note": "Bed Sideway, auto turn on when bedroom occupied at early night",
+    "note": "Bedside; automatically turns on when bedroom is occupied during early evening.",
     "schedule": [
       {"time": "01:00", "level": 0},
       {"time": "19:30", "level": 0},
@@ -42,7 +59,7 @@
   },
   {
     "id": "dev_9ca63a65",
-    "note": "Bed Center, auto turn on when bedroom occupied at early night",
+    "note": "Bed Center; automatically turns on when bedroom is occupied during early evening.",
     "schedule": [
       {"time": "01:00", "level": 0},
       {"time": "19:30", "level": 0},
@@ -55,7 +72,7 @@
   },
   {
     "id": "dev_5d90bf62",
-    "note": "Entry Hall, available all day, auto turn on when entry occupied",
+    "note": "Entry Hall; available all day, automatically turns on when entry is occupied.",
     "schedule": [
       {"time": "00:00", "level": 100}
     ],
@@ -66,7 +83,7 @@
   },
   {
     "id": "dev_9e61e8bb",
-    "note": "Balls, only on when occupied, auto turn off after 5 mins",
+    "note": "Balls; only on when occupied, automatically turns off after 5 minutes.",
     "schedule": [
       {"time": "00:00", "level": 50}
     ],
@@ -76,7 +93,7 @@
   },
   {
     "id": "dev_130e2306",
-    "note": "Living Front",
+    "note": "Living Front.",
     "schedule": [
       {"time": "01:00", "level": 0},
       {"time": "17:00", "level": 0},
@@ -88,10 +105,9 @@
       {"id": "dev_1_3", "name": "sensor.balls", "timeout": 5}
     ]
   },
-
   {
     "id": "dev_a2feaee2",
-    "note": "Bed Hallway",
+    "note": "Bed Hallway.",
     "schedule": [
       {"time": "01:00", "level": 0},
       {"time": "16:45", "level": 0},
@@ -104,26 +120,23 @@
       {"id": "dev_1_9", "name": "sensor.bedroom", "timeout": 1}
     ]
   },
-
   {
     "id": "dev_d7b37112",    
-    "note": "Kitchen Hall, bright almost all day",    
+    "note": "Kitchen Hall; bright almost all day.",    
     "schedule": [
       {"time": "01:00", "level": 0},
       {"time": "10:00", "level": 0},
       {"time": "10:30", "level": 100},
       {"time": "22:00", "level": 100}
     ],
-    
     "sensor": [
       {"id": "dev_1_3", "name": "sensor.balls", "timeout": 10},      
       {"id": "dev_1_11", "name": "sensor.sink", "timeout": 10}
     ]
   },
-  
   {
     "id": "dev_717486b3",
-    "note": "Artificial skylight in office, sky.one",
+    "note": "Artificial skylight in office, sky.one.",
     "schedule": [
       {"time": "01:00", "level": 0, "kelvin": 2700},
       {"time": "05:30", "level": 0, "kelvin": 2700},
@@ -134,10 +147,9 @@
       {"time": "21:30", "level": 50, "kelvin": 2700}
     ]
   },
-
   {
     "id": "dev_2f630eb9",
-    "note": "Artificial skylight in office, sky.two",
+    "note": "Artificial skylight in office, sky.two.",
     "schedule": [
       {"time": "01:00", "level": 0, "kelvin": 2700},
       {"time": "05:30", "level": 0, "kelvin": 2700},
