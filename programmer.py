@@ -18,21 +18,20 @@ logging.basicConfig(
 
 # Global registry for sensor telemetry and state tracking
 sensor_registry = {}
+# Event trigger for instant state evaluation
+state_changed_event = threading.Event()
 
 class CommandDispatcher:
-    def __init__(self, rate_limit_delay: float = 1.0):
-        # Initialize thread-safe queue for command buffering
+    # Changed default rate limit to 0.0 for instant execution
+    def __init__(self, rate_limit_delay: float = 0.0):
         self.cmd_queue = queue.Queue()
-        # Delay in seconds between sequential command executions
         self.rate_limit_delay = rate_limit_delay
         
-        # Start background worker thread
         self.worker_thread = threading.Thread(target=self._process_queue, daemon=True)
         self.worker_thread.start()
 
     def _process_queue(self):
         while True:
-            # Block until a command is available in the queue
             cmd = self.cmd_queue.get()
             if cmd is None:
                 break
@@ -43,14 +42,13 @@ class CommandDispatcher:
             finally:
                 self.cmd_queue.task_done()
             
-            # Throttle execution to prevent server saturation
-            time.sleep(self.rate_limit_delay)
+            if self.rate_limit_delay > 0:
+                time.sleep(self.rate_limit_delay)
 
     def enqueue_command(self, cmd: list):
         self.cmd_queue.put(cmd)
 
-# Global instantiation of the command dispatcher with 1 second delay
-dispatcher = CommandDispatcher(rate_limit_delay=1.0)
+dispatcher = CommandDispatcher(rate_limit_delay=0.0)
 
 class MatterDevice:
     def __init__(self, config):
@@ -66,10 +64,7 @@ class MatterDevice:
         script = self.events[event_name]['script']
         cmd = ["python3", "-c", script] + [str(a) for a in args]
         
-        # Push command payload to the asynchronous dispatcher queue
         dispatcher.enqueue_command(cmd)
-        
-        # Return a status indicator since execution is now deferred
         return "Command queued"
 
 class LightDevice(MatterDevice):
@@ -89,7 +84,6 @@ class SensorDevice(MatterDevice):
             script = self.events.get("subscribe_occupancy", {}).get("script", "")
             if not script: return
             
-            # Use '-u' flag to force unbuffered standard output
             process = subprocess.Popen(["python3", "-u", "-c", script], stdout=subprocess.PIPE, text=True)
             
             for line in process.stdout:
@@ -105,7 +99,6 @@ class MatterController:
         url = f"http://{server_address}/api/metadata"
         logging.info("Fetching hardware metadata from: " + url)
         try:
-            # Execute HTTP GET request to retrieve dynamic configuration
             response = urllib.request.urlopen(url)
             data = json.loads(response.read().decode('utf-8'))
         except Exception as e:
@@ -155,42 +148,42 @@ def calculate_current_state(schedule: list, current_minutes: int) -> dict:
     return target_state
 
 def create_sensor_callback(sensor_id: str):
-    # Closure to maintain sensor context and parse SSE JSON payload
     def callback(data_line):
         raw_data = str(data_line).strip()
         
-        # Isolate payload by verifying and stripping the SSE prefix
         if not raw_data.startswith("data: "):
             return
             
         json_str = raw_data[6:].strip()
         
         try:
-            # Parse the telemetry payload
             payload = json.loads(json_str)
             occupancy = payload.get("occupancy", 0)
             
             logging.info("Sensor Stream [" + sensor_id + "]: " + str(payload))
             
-            # Fetch current state or initialize
             current_state = sensor_registry.get(sensor_id, {"is_occupied": False, "last_cleared": datetime.min})
             
-            # Update temporal state based on state transition
-            if occupancy == 1:
+            state_mutated = False
+            if occupancy == 1 and not current_state["is_occupied"]:
                 current_state["is_occupied"] = True
+                state_mutated = True
             elif occupancy == 0 and current_state["is_occupied"]:
-                # Transition from occupied to unoccupied starts the timeout
                 current_state["is_occupied"] = False
                 current_state["last_cleared"] = datetime.now()
+                state_mutated = True
             elif occupancy == 0 and sensor_id not in sensor_registry:
-                # Initialization case for unpopulated sensors
                 current_state["is_occupied"] = False
                 current_state["last_cleared"] = datetime.min
                 
             sensor_registry[sensor_id] = current_state
+            
+            # Trigger immediate main loop execution if state changes
+            if state_mutated:
+                state_changed_event.set()
                 
         except json.JSONDecodeError:
-            pass # Discard malformed packets silently
+            pass
             
     return callback
 
@@ -201,18 +194,19 @@ def run_automation(server: str, config_path: str):
 
     device_map = {dev.node_id: dev for dev in controller.devices.values()}
     
-    # Initialize asynchronous sensor subscriptions
     for dev in controller.devices.values():
         if isinstance(dev, SensorDevice):
             dev.subscribe_occupancy(create_sensor_callback(dev.node_id))
 
-    # State cache to prevent redundant API calls
     state_cache = {}
-
-    logging.info("Core system initialized. Entering 1Hz telemetry loop.")
+    logging.info("Core system initialized. Entering event-driven telemetry loop.")
 
     try:
         while True:
+            # Wait up to 1 second, or execute immediately if event is triggered
+            state_changed_event.wait(timeout=1.0)
+            state_changed_event.clear()
+
             now = datetime.now()
             current_minutes = now.hour * 60 + now.minute
             
@@ -223,11 +217,9 @@ def run_automation(server: str, config_path: str):
                 if not device or not hasattr(device, 'set_level'):
                     continue
                     
-                # Base Schedule Evaluation
                 schedule = config.get('schedule', [])
                 target_state = calculate_current_state(schedule, current_minutes)
                 
-                # Sensor Override Evaluation
                 sensors = config.get('sensor', [])
                 is_occupied = False
                 
@@ -249,11 +241,9 @@ def run_automation(server: str, config_path: str):
                                 is_occupied = True
                                 break
 
-                # Final Command Resolution
                 target_level = int(target_state.get('level', 0)) if is_occupied else 0
                 target_on = target_level > 0
                 
-                # State Synchronization
                 prev = state_cache.get(device_id, {'state': None, 'level': -1, 'kelvin': -1})
                 
                 if target_on:
@@ -285,8 +275,6 @@ def run_automation(server: str, config_path: str):
                         prev['level'] = 0
                         
                 state_cache[device_id] = prev
-                
-            time.sleep(1)
             
     except KeyboardInterrupt:
         logging.info("Execution terminated by user (SIGINT).")
