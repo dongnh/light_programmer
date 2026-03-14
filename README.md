@@ -53,48 +53,69 @@ python3 programmer.py --server <IP:PORT> --config <CONFIG_FILE>
 ```
 
 ### Optional Advanced Sensor Logic
-- To support complex automation topologies, the system implements an Abstract Syntax Tree (AST) evaluation model via the `sensor_condition` object. This architecture supersedes the legacy flat `sensor` array, allowing for recursive boolean logic combinations.
+* To support complex automation topologies, the system implements an Abstract Syntax Tree (AST) evaluation model via the `sensor_condition` object. This architecture supersedes the legacy flat `sensor` array, allowing for recursive boolean logic combinations and temporal constraints.
 
-- Supported logical operators:
+* Supported node types and logical operators:
     - `AND` (Logical Conjunction): Evaluates to true if all operand nodes evaluate to true.
     - `OR` (Logical Disjunction): Evaluates to true if at least one operand node evaluates to true.
     - `NOT` (Logical Negation): Inverts the boolean state of its primary operand node.
+    - `sensor`: Evaluates physical hardware telemetry based on real-time occupancy state and timeout duration.
+    - `time_window`: Evaluates whether the current system time falls within a strictly defined `start` and `end` interval (supports cross-midnight intervals).
 
 * Example:
-This configuration activates the workspace light only when the desk sensor detects occupancy AND the bed sensor does NOT detect occupancy.
+    - This configuration activates the workspace light only when the desk sensor detects occupancy AND the bed sensor does NOT detect occupancy.
 
-```JSON
-[
+    ```JSON
+    [
+        {
+        "id": "dev_workspace_light",
+        "note": "Workspace light with strict conditional constraints",
+        "schedule": [
+            { "time": "08:00", "level": 100, "kelvin": 5000 },
+            { "time": "22:00", "level": 50, "kelvin": 3000 }
+        ],
+        "sensor_condition": {
+            "operator": "AND",
+            "operands": [
+                {"type": "sensor", "id": "desk_presence", "timeout": 15},
+                {
+                    "operator": "NOT",
+                    "operands": [
+                        {"type": "sensor", "id": "bed_presence", "timeout": 5}
+                    ]
+                }
+            ]
+        }
+        }
+    ]
+    ```
+    - This configuration strictly enforces the schedule from 06:00 to 22:00. Outside of this designated time window (from 22:00 to 06:00), the device relies exclusively on logical disjunction with the physical sensor to trigger activation.
+
+    ```json
     {
-    "id": "dev_workspace_light",
-    "note": "Workspace light with strict conditional constraints",
-    "schedule": [
-        { "time": "08:00", "level": 100, "kelvin": 5000 },
-        { "time": "22:00", "level": 50, "kelvin": 3000 }
-    ],
-    "sensor_condition": {
-        "operator": "AND",
-        "operands": [
-            {
-                "type": "sensor",
-                "id": "desk_presence",
-                "timeout": 15
-            },
-            {
-                "operator": "NOT",
-                "operands": [
-                    {
-                        "type": "sensor",
-                        "id": "bed_presence",
-                        "timeout": 5
-                    }
-                ]
-            }
-        ]
+        "id": "dev_workspace_light",
+        "note": "Maintains schedule during day, sensor-driven at night",
+        "schedule": [
+            { "time": "06:00", "level": 100, "kelvin": 4000 },
+            { "time": "22:00", "level": 10, "kelvin": 2700 }
+        ],
+        "sensor_condition": {
+            "operator": "OR",
+            "operands": [
+                {
+                    "type": "time_window",
+                    "start": "06:00",
+                    "end": "22:00"
+                },
+                {
+                    "type": "sensor",
+                    "id": "dev_1_3",
+                    "timeout": 5
+                }
+            ]
+        }
     }
-    }
-]
-```
+    ```
 
 ### Schedule and Interpolation Logic
 - Applies linear interpolation during active states to calculate precise brightness and color temperature between the nearest scheduled time markers.

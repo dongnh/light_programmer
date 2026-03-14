@@ -188,12 +188,13 @@ def create_sensor_callback(sensor_id: str):
     return callback
 
 def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bool:
-    # Base case: Empty node defaults to True
     if not node:
         return True
 
-    # Base case: Leaf node representing a physical sensor
-    if node.get('type') == 'sensor':
+    node_type = node.get('type')
+
+    # Evaluates physical hardware telemetry
+    if node_type == 'sensor':
         s_id = node.get('id')
         timeout_mins = node.get('timeout', 5)
         sensor_data = registry.get(s_id, {"is_occupied": False, "last_cleared": datetime.min})
@@ -206,18 +207,34 @@ def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bo
             
         return False
 
-    # Recursive case: Internal node representing a logical operator
+    # Evaluates temporal constraints
+    if node_type == 'time_window':
+        start_str = node.get('start', '00:00')
+        end_str = node.get('end', '23:59')
+        current_mins = current_time.hour * 60 + current_time.minute
+        
+        def parse_to_minutes(time_string: str) -> int:
+            h, m = map(int, time_string.split(':'))
+            return h * 60 + m
+            
+        start_mins = parse_to_minutes(start_str)
+        end_mins = parse_to_minutes(end_str)
+        
+        # Handles standard intervals and cross-midnight intervals
+        if start_mins <= end_mins:
+            return start_mins <= current_mins < end_mins
+        else:
+            return current_mins >= start_mins or current_mins < end_mins
+
+    # Evaluates recursive logical operators
     operator = node.get('operator', '').upper()
     operands = node.get('operands', [])
 
     if operator == 'AND':
-        # Logical Conjunction
         return all(evaluate_condition(child, registry, current_time) for child in operands)
     elif operator == 'OR':
-        # Logical Disjunction
         return any(evaluate_condition(child, registry, current_time) for child in operands)
     elif operator == 'NOT':
-        # Logical Negation (applies to the first operand)
         if operands:
             return not evaluate_condition(operands[0], registry, current_time)
         return True
