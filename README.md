@@ -22,16 +22,22 @@ Three lighting modes are supported:
 - A running [`matter-web-controller`](https://github.com/dongnh/matter_webcontrol) instance
 - Matter-compatible lights and sensors
 
+## Installation
+
+```bash
+pip install light-programmer
+```
+
 ## Quick Start
 
 ```bash
 # Step 1: Auto-generate config from your hardware
-python3 genconfig.py --ip 192.168.1.220 --port 8080 --out config.json
+light-genconfig --ip 192.168.1.220 --port 8080 --out config.json
 
 # Step 2: Edit config.json to customize schedules and sensor logic
 
 # Step 3: Run
-python3 programmer.py --server 192.168.1.220:8080 --config config.json
+light-programmer --server 192.168.1.220:8080 --config config.json
 ```
 
 ## Configuration
@@ -107,14 +113,15 @@ For complex scenarios, use `sensor_condition` instead of `sensor`. It supports a
 
 During 06:00-22:00 the light follows its schedule regardless of sensors. Outside that window, it only turns on when the sensor detects motion.
 
-## Files
+## Project Structure
 
 | File | Purpose |
 |------|---------|
-| `programmer.py` | Main automation controller - runs the 1Hz loop |
-| `matter_lib.py` | Device abstraction layer (lights, sensors, controller) |
-| `genconfig.py` | Generates config JSON from hardware discovery |
+| `light_programmer/programmer.py` | Main automation controller - runs the 1Hz loop |
+| `light_programmer/matter_lib.py` | Device abstraction layer (lights, sensors, controller) |
+| `light_programmer/genconfig.py` | Generates config JSON from hardware discovery |
 | `sample.json` | Example configuration with 11 devices |
+| `pyproject.toml` | Package configuration and CLI entry points |
 
 ## License
 

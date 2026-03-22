@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "light-programmer"
+version = "0.1.0"
+description = "Ecosystem-agnostic smart home lighting automation using Matter protocol"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+
+[project.scripts]
+light-programmer = "light_programmer.programmer:main"
+light-genconfig = "light_programmer.genconfig:main"

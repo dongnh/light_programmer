@@ -8,7 +8,7 @@ import subprocess
 import queue
 from datetime import datetime, timedelta
 
-from matter_lib import MatterController, SensorDevice
+from .matter_lib import MatterController, SensorDevice
 
 # Configure logging
 logging.basicConfig(
@@ -259,7 +259,7 @@ def run_automation(server: str, config_path: str):
         logging.info("Terminated by user.")
         sys.exit(0)
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Matter Lighting Automation")
     parser.add_argument("--server", required=True, help="Server IP:PORT")
     parser.add_argument("--config", required=True, help="Path to config JSON")
@@ -270,3 +270,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("System halted.")
         sys.exit(0)
+
+if __name__ == "__main__":
+    main()

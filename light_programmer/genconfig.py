@@ -80,11 +80,14 @@ def generate_lighting_config(ip_address, port, output_filename):
     except IOError as io_error:
         print(f"File write failed: {io_error}")
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Generate compact lighting configuration.")
     parser.add_argument("--ip", type=str, required=True, help="IPv4 address of the bridge")
     parser.add_argument("--port", type=int, default=8080, help="Network port")
     parser.add_argument("--out", type=str, default="lighting_config.json", help="Output JSON filename")
-    
+
     args = parser.parse_args()
     generate_lighting_config(args.ip, args.port, args.out)
+
+if __name__ == "__main__":
+    main()
