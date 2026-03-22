@@ -4,13 +4,21 @@
 
 Smart home lighting automation system using Matter protocol. Controls lights based on time schedules and motion/presence sensors. Supports circadian rhythm-aware color temperature and brightness.
 
+Distributed as PyPI package `light-programmer`.
+
 ## Architecture
 
 ```
-programmer.py  - Main automation loop (1Hz). Subscribes to sensor events (SSE), interpolates schedules, dispatches commands.
-matter_lib.py  - Device abstraction: LightDevice, SensorDevice, MatterController. Talks to matter-web-controller API.
-genconfig.py   - Auto-generates config JSON from hardware metadata at http://<IP>:<PORT>/api/metadata.
-sample.json    - Real-world config example with 11 devices.
+light_programmer/              # Python package
+    __init__.py                # version
+    matter_lib.py              # Device layer: MatterDevice, LightDevice, SensorDevice, MatterController.
+                                 Supports both API fetch (server_address=) and file load (json_path=).
+                                 Devices accept an optional dispatcher for queued execution.
+    programmer.py              # Automation engine: CommandDispatcher, scheduling, sensor logic, main 1Hz loop.
+                                 Imports device classes from matter_lib.
+    genconfig.py               # Auto-generates config JSON from hardware metadata.
+pyproject.toml                 # Package config, CLI entry points
+sample.json                    # Real-world config example with 11 devices
 ```
 
 ## Key Concepts
@@ -25,11 +33,12 @@ sample.json    - Real-world config example with 11 devices.
 ## Running
 
 ```bash
-# 1. Generate config from hardware
-python3 genconfig.py --ip <IP> --port <PORT> --out config.json
+# Install
+pip install -e .
 
-# 2. Run automation
-python3 programmer.py --server <IP:PORT> --config config.json
+# CLI commands
+light-genconfig --ip <IP> --port <PORT> --out config.json
+light-programmer --server <IP:PORT> --config config.json
 ```
 
 ## Dependencies
