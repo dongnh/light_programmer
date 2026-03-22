@@ -19,7 +19,7 @@ Three lighting modes are supported:
 ## Requirements
 
 - Python 3
-- A running [`matter-web-controller`](https://github.com/nicoh88/matter-web-controller) instance
+- A running [`matter-web-controller`](https://github.com/dongnh/matter_webcontrol) instance
 - Matter-compatible lights and sensors
 
 ## Quick Start
