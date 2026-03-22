@@ -1,32 +1,31 @@
 import json
-import subprocess
 import threading
 import time
 import argparse
 import logging
 import sys
-import urllib.request
+import subprocess
 import queue
 from datetime import datetime, timedelta
 
-# Configure logging interface
+from matter_lib import MatterController, SensorDevice
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     datefmt='%H:%M:%S'
 )
 
-# Global registry for sensor telemetry and state tracking
+# Global sensor state and event trigger
 sensor_registry = {}
-# Event trigger for instant state evaluation
 state_changed_event = threading.Event()
 
+
 class CommandDispatcher:
-    # Default rate limit to 0.0 for instant execution
     def __init__(self, rate_limit_delay: float = 0.0):
         self.cmd_queue = queue.Queue()
         self.rate_limit_delay = rate_limit_delay
-        
         self.worker_thread = threading.Thread(target=self._process_queue, daemon=True)
         self.worker_thread.start()
 
@@ -41,77 +40,15 @@ class CommandDispatcher:
                 logging.error("Command execution failed: " + str(e))
             finally:
                 self.cmd_queue.task_done()
-            
+
             if self.rate_limit_delay > 0:
                 time.sleep(self.rate_limit_delay)
 
     def enqueue_command(self, cmd: list):
         self.cmd_queue.put(cmd)
 
-dispatcher = CommandDispatcher(rate_limit_delay=0.0)
 
-class MatterDevice:
-    def __init__(self, config):
-        self.node_id = config.get('node_id')
-        self.name = config.get('name')
-        self.hardware_type = config.get('hardware_type')
-        self.events = config.get('events', {})
-
-    def _run_script(self, event_name, *args):
-        if event_name not in self.events:
-            raise ValueError("Event is not defined for this device.")
-        
-        script = self.events[event_name]['script']
-        cmd = ["python3", "-c", script] + [str(a) for a in args]
-        
-        dispatcher.enqueue_command(cmd)
-        return "Command queued"
-
-class LightDevice(MatterDevice):
-    def turn_on(self): return self._run_script("turn_on")
-    def turn_off(self): return self._run_script("turn_off")
-    def set_level(self, level: int): return self._run_script("set_level", level)
-    def read_level(self): return self._run_script("read_level")
-    def set_color_temperature(self, mireds: int): return self._run_script("set_color_temperature", mireds)
-    def read_color_temperature(self): return self._run_script("read_color_temperature")
-
-class SensorDevice(MatterDevice):
-    def read_occupancy(self):
-        return self._run_script("read_occupancy")
-
-    def subscribe_occupancy(self, callback_function):
-        def run_stream():
-            script = self.events.get("subscribe_occupancy", {}).get("script", "")
-            if not script: return
-            
-            process = subprocess.Popen(["python3", "-u", "-c", script], stdout=subprocess.PIPE, text=True)
-            
-            for line in process.stdout:
-                if line.strip():
-                    callback_function(line.strip())
-                    
-        listener_thread = threading.Thread(target=run_stream, daemon=True)
-        listener_thread.start()
-        return listener_thread
-
-class MatterController:
-    def __init__(self, server_address: str):
-        url = f"http://{server_address}/api/metadata"
-        logging.info("Fetching hardware metadata from: " + url)
-        try:
-            response = urllib.request.urlopen(url)
-            data = json.loads(response.read().decode('utf-8'))
-        except Exception as e:
-            logging.error("Failed to retrieve metadata: " + str(e))
-            sys.exit(1)
-
-        self.devices = {}
-        for dev_config in data.get('devices', []):
-            hw_type = dev_config.get('hardware_type', '')
-            if 'light' in hw_type:
-                self.devices[dev_config['name']] = LightDevice(dev_config)
-            elif 'sensor' in hw_type:
-                self.devices[dev_config['name']] = SensorDevice(dev_config)
+# --- Scheduling ---
 
 def time_to_minutes(time_str: str) -> int:
     hours, minutes = map(int, time_str.split(':'))
@@ -147,24 +84,24 @@ def calculate_current_state(schedule: list, current_minutes: int) -> dict:
         target_state['kelvin'] = interpolate_value(current_minutes, t1, t2, prev_point['kelvin'], next_point['kelvin'])
     return target_state
 
+
+# --- Sensor Logic ---
+
 def create_sensor_callback(sensor_id: str):
     def callback(data_line):
         raw_data = str(data_line).strip()
-        
         if not raw_data.startswith("data: "):
             return
-            
+
         json_str = raw_data[6:].strip()
-        
         try:
             payload = json.loads(json_str)
             occupancy = payload.get("occupancy", 0)
-            
             logging.info("Sensor Stream [" + sensor_id + "]: " + str(payload))
-            
+
             current_state = sensor_registry.get(sensor_id, {"is_occupied": False, "last_cleared": datetime.min})
-            
             state_mutated = False
+
             if occupancy == 1 and not current_state["is_occupied"]:
                 current_state["is_occupied"] = True
                 state_mutated = True
@@ -175,16 +112,14 @@ def create_sensor_callback(sensor_id: str):
             elif occupancy == 0 and sensor_id not in sensor_registry:
                 current_state["is_occupied"] = False
                 current_state["last_cleared"] = datetime.min
-                
+
             sensor_registry[sensor_id] = current_state
-            
-            # Trigger immediate main loop execution if state changes
+
             if state_mutated:
                 state_changed_event.set()
-                
         except json.JSONDecodeError:
             pass
-            
+
     return callback
 
 def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bool:
@@ -193,40 +128,29 @@ def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bo
 
     node_type = node.get('type')
 
-    # Evaluates physical hardware telemetry
     if node_type == 'sensor':
         s_id = node.get('id')
         timeout_mins = node.get('timeout', 5)
         sensor_data = registry.get(s_id, {"is_occupied": False, "last_cleared": datetime.min})
-        
+
         if sensor_data["is_occupied"]:
             return True
-            
         if (current_time - sensor_data["last_cleared"]) <= timedelta(minutes=timeout_mins):
             return True
-            
         return False
 
-    # Evaluates temporal constraints
     if node_type == 'time_window':
         start_str = node.get('start', '00:00')
         end_str = node.get('end', '23:59')
         current_mins = current_time.hour * 60 + current_time.minute
-        
-        def parse_to_minutes(time_string: str) -> int:
-            h, m = map(int, time_string.split(':'))
-            return h * 60 + m
-            
-        start_mins = parse_to_minutes(start_str)
-        end_mins = parse_to_minutes(end_str)
-        
-        # Handles standard intervals and cross-midnight intervals
+        start_mins = time_to_minutes(start_str)
+        end_mins = time_to_minutes(end_str)
+
         if start_mins <= end_mins:
             return start_mins <= current_mins < end_mins
         else:
             return current_mins >= start_mins or current_mins < end_mins
 
-    # Evaluates recursive logical operators
     operator = node.get('operator', '').upper()
     operands = node.get('operands', [])
 
@@ -238,106 +162,111 @@ def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bo
         if operands:
             return not evaluate_condition(operands[0], registry, current_time)
         return True
-        
+
     return False
 
+
+# --- Main Loop ---
+
 def run_automation(server: str, config_path: str):
-    controller = MatterController(server)
+    dispatcher = CommandDispatcher(rate_limit_delay=0.0)
+    controller = MatterController(server_address=server)
+
+    # Inject dispatcher so device commands go through the queue
+    for dev in controller.devices.values():
+        dev.dispatcher = dispatcher
+
     with open(config_path, 'r', encoding='utf-8') as f:
         lighting_configs = json.load(f)
 
     device_map = {dev.node_id: dev for dev in controller.devices.values()}
-    
+
     for dev in controller.devices.values():
         if isinstance(dev, SensorDevice):
             dev.subscribe_occupancy(create_sensor_callback(dev.node_id))
 
     state_cache = {}
-    logging.info("Core system initialized. Entering event-driven telemetry loop.")
+    logging.info("System initialized. Entering main loop.")
 
     try:
         while True:
-            # Wait up to 1 second, or execute immediately if event is triggered
             state_changed_event.wait(timeout=1.0)
             state_changed_event.clear()
 
             now = datetime.now()
             current_minutes = now.hour * 60 + now.minute
-            
+
             for config in lighting_configs:
                 device_id = config['id']
                 device = device_map.get(device_id)
-                
+
                 if not device or not hasattr(device, 'set_level'):
                     continue
-                    
+
                 schedule = config.get('schedule', [])
                 target_state = calculate_current_state(schedule, current_minutes)
-                
-                # Update: Evaluate occupancy using the recursive AST parser
+
+                # Evaluate occupancy
                 sensor_cond = config.get('sensor_condition')
                 legacy_sensors = config.get('sensor', [])
-                is_occupied = False
-                
+
                 if sensor_cond:
                     is_occupied = evaluate_condition(sensor_cond, sensor_registry, now)
                 elif legacy_sensors:
-                    # Fallback to logical OR for backward compatibility
                     is_occupied = any(
-                        evaluate_condition({"type": "sensor", **s}, sensor_registry, now) 
+                        evaluate_condition({"type": "sensor", **s}, sensor_registry, now)
                         for s in legacy_sensors
                     )
                 else:
-                    # Default to occupied if no sensor configuration is provided
                     is_occupied = True
 
                 target_level = int(target_state.get('level', 0)) if is_occupied else 0
                 target_on = target_level > 0
-                
+
                 prev = state_cache.get(device_id, {'state': None, 'level': -1, 'kelvin': -1})
-                
+
                 if target_on:
                     matter_level = int((target_level / 100.0) * 254)
-                    
+
                     if prev['state'] != 'ON':
-                        logging.info("[" + device.name + "] Actuating: TURN ON")
+                        logging.info("[" + device.name + "] TURN ON")
                         device.turn_on()
                         prev['state'] = 'ON'
-                        
+
                     if abs(prev['level'] - matter_level) >= 2:
-                        logging.info("[" + device.name + "] Adjusting Level: " + str(matter_level))
+                        logging.info("[" + device.name + "] Level: " + str(matter_level))
                         device.set_level(matter_level)
                         prev['level'] = matter_level
-                        
+
                     if 'kelvin' in target_state:
                         kelvin = int(target_state['kelvin'])
                         mireds = int(1000000 / kelvin) if kelvin > 0 else 250
-                        
+
                         if abs(prev['kelvin'] - kelvin) > 50 and hasattr(device, 'set_color_temperature'):
-                            logging.info("[" + device.name + "] Adjusting Temperature: " + str(kelvin) + "K")
+                            logging.info("[" + device.name + "] Temp: " + str(kelvin) + "K")
                             device.set_color_temperature(mireds)
                             prev['kelvin'] = kelvin
                 else:
                     if prev['state'] != 'OFF':
-                        logging.info("[" + device.name + "] Actuating: TURN OFF")
+                        logging.info("[" + device.name + "] TURN OFF")
                         device.turn_off()
                         prev['state'] = 'OFF'
                         prev['level'] = 0
-                        
+
                 state_cache[device_id] = prev
-            
+
     except KeyboardInterrupt:
-        logging.info("Execution terminated by user (SIGINT).")
+        logging.info("Terminated by user.")
         sys.exit(0)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Matter Automation Controller")
-    parser.add_argument("--server", required=True, help="Server IP and port (e.g., 192.168.1.220:8080)")
-    parser.add_argument("--config", required=True, help="Path to schedule JSON")
+    parser = argparse.ArgumentParser(description="Matter Lighting Automation")
+    parser.add_argument("--server", required=True, help="Server IP:PORT")
+    parser.add_argument("--config", required=True, help="Path to config JSON")
     args = parser.parse_args()
-    
+
     try:
         run_automation(args.server, args.config)
     except KeyboardInterrupt:
-        logging.info("System safely halted.")
+        logging.info("System halted.")
         sys.exit(0)

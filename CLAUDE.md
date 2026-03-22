@@ -7,8 +7,11 @@ Smart home lighting automation system using Matter protocol. Controls lights bas
 ## Architecture
 
 ```
-programmer.py  - Main automation loop (1Hz). Subscribes to sensor events (SSE), interpolates schedules, dispatches commands.
-matter_lib.py  - Device abstraction: LightDevice, SensorDevice, MatterController. Talks to matter-web-controller API.
+matter_lib.py  - Device layer (single source of truth): MatterDevice, LightDevice, SensorDevice, MatterController.
+                 Supports both API fetch (server_address=) and file load (json_path=).
+                 Devices accept an optional dispatcher for queued execution.
+programmer.py  - Automation engine: CommandDispatcher, scheduling, sensor logic, main 1Hz loop.
+                 Imports device classes from matter_lib.
 genconfig.py   - Auto-generates config JSON from hardware metadata at http://<IP>:<PORT>/api/metadata.
 sample.json    - Real-world config example with 11 devices.
 ```
