@@ -207,3 +207,15 @@ marimo/_lsp/
 __marimo__/
 .DS_Store
 /.claude
+.venv-test/
+.venv-matter/
+.venv-yee/
+tests_local/
+
+# Runtime artifacts from local controllers (contain private network/device info)
+cache.json
+casambi-bt-store/
+devices_cache.txt
+names_cache.json
+occupancy_cache.json
+matter_storage/

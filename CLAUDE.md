@@ -11,12 +11,13 @@ Distributed as PyPI package `light-programmer`.
 ```
 light_programmer/              # Python package
     __init__.py                # version
-    matter_lib.py              # Device layer: MatterDevice, LightDevice, SensorDevice, MatterController.
-                                 Supports both API fetch (server_address=) and file load (json_path=).
-                                 Devices accept an optional dispatcher for queued execution.
-    programmer.py              # Automation engine: CommandDispatcher, scheduling, sensor logic, main 1Hz loop.
+    matter_lib.py              # MatterClient (HTTP+X-API-Key), MatterDevice, LightDevice, SensorDevice, MatterController.
+                                 Talks REST to matter_webcontrol: /api/level, /api/mired, /api/toggle, /api/subscribe (SSE).
+                                 Device list fetched from /api/metadata (server_address=) or loaded from disk (json_path=).
+                                 Devices accept an optional dispatcher (callable queue) for serialized execution.
+    programmer.py              # Automation engine: CommandDispatcher (callable queue), scheduling, sensor logic, main 1Hz loop.
                                  Imports device classes from matter_lib.
-    genconfig.py               # Auto-generates config JSON from hardware metadata.
+    genconfig.py               # Auto-generates config JSON from /api/metadata.
 pyproject.toml                 # Package config, CLI entry points
 sample.json                    # Real-world config example with 11 devices
 ```
@@ -36,14 +37,15 @@ sample.json                    # Real-world config example with 11 devices
 # Install
 pip install -e .
 
-# CLI commands
-light-genconfig --ip <IP> --port <PORT> --out config.json
-light-programmer --server <IP:PORT> --config config.json
+# CLI commands (set MATTER_SRV_KEY env var or pass --api-key if the server requires auth)
+light-genconfig --ip <IP> --port <PORT> --out config.json [--api-key <KEY>]
+light-programmer --server <IP:PORT> --config config.json [--api-key <KEY>]
 ```
 
 ## Dependencies
 
-Pure Python 3 stdlib (no pip packages). Requires a running `matter-web-controller` instance.
+Pure Python 3 stdlib (no pip packages). Requires a running `matter_webcontrol` instance
+(https://github.com/dongnh/matter_webcontrol).
 
 ## Code Conventions
 

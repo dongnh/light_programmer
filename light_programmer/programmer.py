@@ -1,10 +1,10 @@
 import json
+import os
 import threading
 import time
 import argparse
 import logging
 import sys
-import subprocess
 import queue
 from datetime import datetime, timedelta
 
@@ -23,6 +23,8 @@ state_changed_event = threading.Event()
 
 
 class CommandDispatcher:
+    """Background queue that serializes calls to avoid flooding the controller."""
+
     def __init__(self, rate_limit_delay: float = 0.0):
         self.cmd_queue = queue.Queue()
         self.rate_limit_delay = rate_limit_delay
@@ -31,11 +33,11 @@ class CommandDispatcher:
 
     def _process_queue(self):
         while True:
-            cmd = self.cmd_queue.get()
-            if cmd is None:
+            fn = self.cmd_queue.get()
+            if fn is None:
                 break
             try:
-                subprocess.run(cmd, capture_output=True, text=True)
+                fn()
             except Exception as e:
                 logging.error("Command execution failed: " + str(e))
             finally:
@@ -44,8 +46,8 @@ class CommandDispatcher:
             if self.rate_limit_delay > 0:
                 time.sleep(self.rate_limit_delay)
 
-    def enqueue_command(self, cmd: list):
-        self.cmd_queue.put(cmd)
+    def enqueue(self, fn):
+        self.cmd_queue.put(fn)
 
 
 # --- Scheduling ---
@@ -90,10 +92,10 @@ def calculate_current_state(schedule: list, current_minutes: int) -> dict:
 def create_sensor_callback(sensor_id: str):
     def callback(data_line):
         raw_data = str(data_line).strip()
-        if not raw_data.startswith("data: "):
+        if not raw_data.startswith("data:"):
             return
 
-        json_str = raw_data[6:].strip()
+        json_str = raw_data[5:].lstrip()
         try:
             payload = json.loads(json_str)
             occupancy = payload.get("occupancy", 0)
@@ -168,9 +170,9 @@ def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bo
 
 # --- Main Loop ---
 
-def run_automation(server: str, config_path: str):
+def run_automation(server: str, config_path: str, api_key: str = None):
     dispatcher = CommandDispatcher(rate_limit_delay=0.0)
-    controller = MatterController(server_address=server)
+    controller = MatterController(server_address=server, api_key=api_key)
 
     # Inject dispatcher so device commands go through the queue
     for dev in controller.devices.values():
@@ -179,11 +181,11 @@ def run_automation(server: str, config_path: str):
     with open(config_path, 'r', encoding='utf-8') as f:
         lighting_configs = json.load(f)
 
-    device_map = {dev.node_id: dev for dev in controller.devices.values()}
+    device_map = {dev.id: dev for dev in controller.devices.values()}
 
     for dev in controller.devices.values():
         if isinstance(dev, SensorDevice):
-            dev.subscribe_occupancy(create_sensor_callback(dev.node_id))
+            dev.subscribe_occupancy(create_sensor_callback(dev.id))
 
     state_cache = {}
     logging.info("System initialized. Entering main loop.")
@@ -263,10 +265,12 @@ def main():
     parser = argparse.ArgumentParser(description="Matter Lighting Automation")
     parser.add_argument("--server", required=True, help="Server IP:PORT")
     parser.add_argument("--config", required=True, help="Path to config JSON")
+    parser.add_argument("--api-key", default=os.environ.get("MATTER_SRV_KEY"),
+                        help="X-API-Key for the matter_webcontrol server (or set MATTER_SRV_KEY)")
     args = parser.parse_args()
 
     try:
-        run_automation(args.server, args.config)
+        run_automation(args.server, args.config, api_key=args.api_key)
     except KeyboardInterrupt:
         logging.info("System halted.")
         sys.exit(0)
