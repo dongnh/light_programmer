@@ -115,7 +115,7 @@ During 06:00-22:00 the light follows its schedule regardless of sensors. Outside
 
 ## Air Conditioner Control
 
-AC entries are temperature-driven (no time schedule). They use a Matter thermostat (`/api/ac`) plus a separate climate sensor (`/api/climate`) for the ambient reading.
+AC entries are climate-driven (no time schedule). They use a Matter thermostat (`/api/ac`) and read ambient state via `/api/climate` — either from one or more standalone climate sensors, or directly from the AC's own thermostat (`local_temperature`) when no sensor is configured.
 
 ```jsonc
 {
@@ -134,13 +134,13 @@ AC entries are temperature-driven (no time schedule). They use a Matter thermost
 }
 ```
 
-**Bring-up rule** (off → on): ambient ≥ `on_above` **AND** occupancy continuously satisfied for `on_delay_minutes` **AND** time within `active_window`.
+**Bring-up rule** (off → on): climate trigger **AND** occupancy continuously satisfied for `on_delay_minutes` **AND** time within `active_window`.
 
-**Bring-down rule** (on → off): ambient ≤ `off_below`, **OR** occupancy fails (after each sensor's `timeout` hold), **OR** outside `active_window`.
+**Bring-down rule** (on → off): climate trigger no longer met, **OR** occupancy fails (after each sensor's `timeout` hold), **OR** outside `active_window`.
 
-In the dead band between `off_below` and `on_above` the AC holds its previous state — this is the hysteresis. For `mode: "heat"`, swap to `on_below` / `off_above` (turn on when cold enough, off when warm enough).
+The climate trigger is the OR of two independent hysteresis loops — temperature (`on_above` / `off_below`) and humidity (`humidity_above` / `humidity_below`). The AC turns on when either dimension says on, and off only when every configured dimension says off. In the dead band of every dimension, it holds the previous state. Use `climate_sensors` (list) to aggregate readings across multiple sensors with any-trigger semantics (max temp / max humidity). For `mode: "heat"`, use `on_below` / `off_above` instead.
 
-The same `sensor` / `sensor_condition` AST used by lights applies — combine multiple occupancy sensors with `AND`/`OR`/`NOT` as needed. If the climate sensor is unreachable, the AC holds its last decision rather than flapping.
+The same `sensor` / `sensor_condition` AST used by lights applies — combine multiple occupancy sensors with `AND`/`OR`/`NOT` as needed. If a climate reading is unavailable, that dimension holds its last decision rather than flapping.
 
 ## MCP Server (AI Agent Configuration)
 

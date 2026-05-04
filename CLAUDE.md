@@ -31,13 +31,20 @@ sample.json                    # Real-world config example with 11 devices
 ## Key Concepts
 
 - **Light schedule**: Array of `{time, level, kelvin}` points. Linearly interpolated. Cross-midnight supported.
-- **AC entry**: `"type": "ac"` with fields `climate_sensor`, `mode` (`cool`/`heat`/`dry`/`fan`/`auto`),
-  `setpoint` (°C). Temperature-driven hysteresis:
-  - cool/dry/fan/auto: `on_above` (turn on °C), `off_below` (turn off °C).
-  - heat: `on_below`, `off_above`.
-  Optional `active_window: {start, end}` restricts operating hours; `sensor`/`sensor_condition`
-  gate by occupancy. AC is forced OFF when occupancy fails or outside window. Missing temperature
-  reading holds the previous decision.
+- **AC entry**: `"type": "ac"` with fields:
+  - `climate_sensor` (one ID) or `climate_sensors` (list). Omit both to use the AC's own
+    thermostat (`local_temperature`). Multi-sensor uses any-trigger semantics: max temp /
+    max humidity across sensors.
+  - `mode` (`cool`/`heat`/`dry`/`fan`/`auto`), `setpoint` (°C).
+  - Temperature hysteresis: cool/dry/fan/auto use `on_above` / `off_below`; heat uses
+    `on_below` / `off_above`.
+  - Optional humidity hysteresis: `humidity_above` / `humidity_below` (only fires when a
+    configured sensor reports humidity).
+  - Combined: ON if temperature OR humidity dim says on; OFF only when every configured
+    dimension says off; otherwise holds previous state.
+  - Optional `active_window: {start, end}` restricts operating hours; `sensor` /
+    `sensor_condition` gate by occupancy. AC is forced OFF when occupancy fails or
+    outside window. Missing climate reading on a dimension holds previous decision.
 - **AC on-delay**: `on_delay_minutes` (default 5) — occupancy must be continuously satisfied for
   this many minutes before the AC is allowed to turn on. Resets if occupancy lapses. Once on,
   the AC stays on regardless of this delay (it only gates the transition off→on).

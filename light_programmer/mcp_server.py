@@ -95,6 +95,10 @@ def _validate_entry(entry: dict, idx: int) -> list[str]:
                 errs.append(f"{where}: 'off_above' ({off_above}) must be > 'on_below' ({on_below})")
         if entry.get("setpoint") is not None and not isinstance(entry["setpoint"], (int, float)):
             errs.append(f"{where}: 'setpoint' must be numeric")
+        h_on = entry.get("humidity_above")
+        h_off = entry.get("humidity_below")
+        if h_on is not None and h_off is not None and h_off >= h_on:
+            errs.append(f"{where}: 'humidity_below' ({h_off}) must be < 'humidity_above' ({h_on})")
         if entry.get("on_delay_minutes") is not None and entry["on_delay_minutes"] < 0:
             errs.append(f"{where}: 'on_delay_minutes' must be ≥ 0")
         win = entry.get("active_window")
@@ -269,16 +273,19 @@ LIGHT entry:
     "sensor_condition": <AST: AND/OR/NOT/sensor/time_window> }
   level/kelvin are linearly interpolated between schedule points (cross-midnight ok).
 
-AC entry (temperature-driven, no schedule):
+AC entry (climate-driven, no schedule):
   { "id": "dev_*", "type": "ac",
-    "climate_sensor": "dev_*",
+    "climate_sensor":  "dev_*",                       # one sensor (omit to use AC's own thermostat)
+    "climate_sensors": ["dev_*", ...],                # OR multiple sensors (any-trigger)
     "mode": "cool"|"heat"|"dry"|"fan"|"auto",
-    "setpoint": <°C>,
-    # cool/dry/fan/auto:
-    "on_above": <°C>, "off_below": <°C>,    # off_below < on_above (hysteresis band)
-    # heat:
-    "on_below": <°C>, "off_above": <°C>,    # off_above > on_below
-    "on_delay_minutes": 5,                   # require continuous occupancy ≥ N min
+    "setpoint": <C>,
+    # temperature thresholds (cool/dry/fan/auto):
+    "on_above": <C>, "off_below": <C>,                # off_below < on_above
+    # OR for heating mode:
+    "on_below": <C>, "off_above": <C>,                # off_above > on_below
+    # optional humidity thresholds (active only when sensors expose humidity):
+    "humidity_above": <%>, "humidity_below": <%>,
+    "on_delay_minutes": 5,                            # require continuous occupancy >= N min
     "active_window": {"start":"HH:MM","end":"HH:MM"},
     "sensor": [...] OR "sensor_condition": {...} }
 

@@ -176,6 +176,17 @@ def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bo
     return False
 
 
+def _client_read_climate(climate_devices: dict, sensor_id: str, client) -> dict:
+    """Read /api/climate?id=... — accepts standalone climate sensors AND
+    thermostats (which expose only `temperature`). Uses a registered
+    ClimateSensorDevice when available; otherwise hits the API directly via
+    the controller's HTTP client."""
+    dev = climate_devices.get(sensor_id)
+    if dev is not None:
+        return dev.read_climate() or {}
+    return client.get("/api/climate", {"id": sensor_id}) or {}
+
+
 # --- Climate / time-window helpers ---
 
 def _within_window(window: dict, now: datetime) -> bool:
@@ -189,41 +200,68 @@ def _within_window(window: dict, now: datetime) -> bool:
     return cur >= start_mins or cur < end_mins
 
 
-def decide_ac_on(config: dict, current_temp: float, prev_on: bool) -> bool:
-    """Hysteresis decision based on ambient temperature.
+def _dim_decide(reading, on_thr, off_thr, kind, prev_on):
+    """Per-dimension hysteresis decision. kind = 'rising' (cool/humid) or 'falling' (heat).
 
-    Cool mode: ON when temp >= on_above, OFF when temp <= off_below, stay otherwise.
-    Heat mode: ON when temp <= on_below, OFF when temp >= off_above, stay otherwise.
-    If only one threshold given, the other defaults to it (no hysteresis band).
+    Returns True (on), False (off), or None (dimension not configured / no reading).
+    Inside the dead band, the dimension carries `prev_on` so it can keep the AC running
+    when another dimension has already dropped past its off threshold.
     """
-    if current_temp is None:
-        return prev_on  # no reading -> hold last decision
+    if reading is None or on_thr is None:
+        return None
+    if off_thr is None:
+        off_thr = on_thr
+    if kind == "rising":
+        if reading >= on_thr:
+            return True
+        if reading <= off_thr:
+            return False
+    else:  # falling
+        if reading <= on_thr:
+            return True
+        if reading >= off_thr:
+            return False
+    return prev_on
 
+
+def decide_ac_on(config: dict, temps: list, humids: list, prev_on: bool) -> bool:
+    """Combined temperature + humidity hysteresis across multiple climate sensors.
+
+    Per-dimension aggregation:
+      - cooling (cool/dry/fan/auto) and humidity use MAX across sensors (any sensor
+        reporting high triggers on).
+      - heating uses MIN (any sensor reporting cold triggers on).
+    Per-dimension decision uses its own thresholds with hysteresis. The combined
+    state is the logical OR: AC is on if any dimension says on, off only when
+    every configured dimension says off, and holds prev otherwise.
+    """
     mode = (config.get("mode") or "cool").lower()
 
-    if mode in ("cool", "dry", "fan", "fan_only", "auto"):
-        on_above = config.get("on_above")
-        off_below = config.get("off_below", on_above)
-        if on_above is None:
-            return prev_on
-        if current_temp >= on_above:
-            return True
-        if off_below is not None and current_temp <= off_below:
-            return False
-        return prev_on
-
     if mode == "heat":
-        on_below = config.get("on_below")
-        off_above = config.get("off_above", on_below)
-        if on_below is None:
-            return prev_on
-        if current_temp <= on_below:
-            return True
-        if off_above is not None and current_temp >= off_above:
-            return False
-        return prev_on
+        temp_kind = "falling"
+        on_thr = config.get("on_below")
+        off_thr = config.get("off_above")
+        temp_reading = min([t for t in temps if t is not None], default=None)
+    else:
+        temp_kind = "rising"
+        on_thr = config.get("on_above")
+        off_thr = config.get("off_below")
+        temp_reading = max([t for t in temps if t is not None], default=None)
 
-    return False
+    temp_decision = _dim_decide(temp_reading, on_thr, off_thr, temp_kind, prev_on)
+
+    humid_reading = max([h for h in humids if h is not None], default=None)
+    humid_decision = _dim_decide(humid_reading,
+                                 config.get("humidity_above"),
+                                 config.get("humidity_below"),
+                                 "rising", prev_on)
+
+    decisions = [d for d in (temp_decision, humid_decision) if d is not None]
+    if any(decisions):
+        return True
+    if decisions:  # has at least one definitive False, none True
+        return False
+    return prev_on
 
 
 # --- Main Loop ---
@@ -296,14 +334,27 @@ def _apply_ac(config, device, now, climate_devices, state_cache):
 
     in_window = _within_window(config.get('active_window'), now)
 
-    sensor_id = config.get('climate_sensor')
-    climate_dev = climate_devices.get(sensor_id) if sensor_id else None
-    current_temp = None
-    if climate_dev is not None:
+    # Climate sensors: accept `climate_sensors` (list) or `climate_sensor` (single).
+    # Default to the AC's own thermostat if neither is given (uses local_temperature).
+    raw_ids = config.get('climate_sensors')
+    if not raw_ids:
+        single = config.get('climate_sensor')
+        raw_ids = [single] if single else [config['id']]
+
+    temps: list = []
+    humids: list = []
+    for sid in raw_ids:
         try:
-            current_temp = (climate_dev.read_climate() or {}).get('temperature')
+            reading = _client_read_climate(climate_devices, sid, device.client) or {}
         except Exception as e:
-            logging.warning(f"Climate read failed for {sensor_id}: {e}")
+            logging.warning(f"Climate read failed for {sid}: {e}")
+            continue
+        if (t := reading.get('temperature')) is not None:
+            temps.append(t)
+        if (h := reading.get('humidity')) is not None:
+            humids.append(h)
+
+    primary_temp = temps[0] if temps else None
 
     prev = state_cache.get(config['id'],
                            {'on': False, 'mode': None, 'setpoint': None, 'occupied_since': None})
@@ -320,8 +371,8 @@ def _apply_ac(config, device, now, climate_devices, state_cache):
         occupied_for = 0.0
     occupancy_ready = is_occupied and (prev['on'] or occupied_for >= on_delay)
 
-    temp_says_on = decide_ac_on(config, current_temp, prev.get('on', False))
-    effective_on = temp_says_on and occupancy_ready and in_window
+    climate_says_on = decide_ac_on(config, temps, humids, prev.get('on', False))
+    effective_on = climate_says_on and occupancy_ready and in_window
 
     target_mode_name = (config.get('mode') or 'cool').lower()
     target_mode = parse_ac_mode(target_mode_name)
@@ -331,7 +382,7 @@ def _apply_ac(config, device, now, climate_devices, state_cache):
 
     if effective_on:
         if not prev['on'] or prev['mode'] != target_mode:
-            temp_log = f" (temp={current_temp:.1f}°C)" if current_temp is not None else ""
+            temp_log = f" (temp={primary_temp:.1f}°C)" if primary_temp is not None else ""
             sp_log = f", setpoint={target_setpoint:.1f}" if target_setpoint is not None else ""
             logging.info(f"[{device.name}] AC ON mode={target_mode_name}{sp_log}{temp_log}")
             device.set_state(on=True, mode=target_mode, setpoint=target_setpoint)
@@ -345,8 +396,8 @@ def _apply_ac(config, device, now, climate_devices, state_cache):
             prev['setpoint'] = target_setpoint
     else:
         if prev['on']:
-            temp_log = f" (temp={current_temp:.1f}°C)" if current_temp is not None else ""
-            reason = ("temp" if not temp_says_on
+            temp_log = f" (temp={primary_temp:.1f}°C)" if primary_temp is not None else ""
+            reason = ("climate" if not climate_says_on
                       else "occupancy" if not is_occupied
                       else "warmup" if not occupancy_ready
                       else "window")
