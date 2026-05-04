@@ -37,6 +37,7 @@ from .matter_lib import (
     _classify,
     parse_ac_mode,
 )
+from . import mode_state as _mode_state
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
@@ -280,6 +281,38 @@ LOG_PATHS = {
     label: os.environ.get(f"LP_MCP_LOG_{label.upper().replace('.', '_')}", default)
     for label, default in _DEFAULT_LOGS.items()
 }
+
+
+# ---------------------------------------------------------------------------
+# Mode flags (auto / kill) shared with the programmer loop and HomeKit bridge
+# ---------------------------------------------------------------------------
+
+def _resolve_mode_path(state_path: Optional[str]) -> str:
+    path = state_path or os.environ.get("LP_MODE_STATE")
+    if not path:
+        raise ValueError(
+            "mode state path not provided. Pass `state_path=...` or set LP_MODE_STATE."
+        )
+    return path
+
+
+@mcp.tool()
+def get_mode(state_path: Optional[str] = None) -> dict:
+    """Read the current global mode flags `{auto, kill}`.
+
+    `auto=False` pauses the schedule loop; devices are left as-is.
+    `kill=True` forces all devices off and keeps them off until cleared.
+    """
+    return _mode_state.load(_resolve_mode_path(state_path))
+
+
+@mcp.tool()
+def set_mode(auto: Optional[bool] = None, kill: Optional[bool] = None,
+             state_path: Optional[str] = None) -> dict:
+    """Update mode flags. Omit a field to leave it unchanged. Returns new state."""
+    if auto is None and kill is None:
+        raise ValueError("set_mode requires at least one of `auto` or `kill`.")
+    return _mode_state.update(_resolve_mode_path(state_path), auto=auto, kill=kill)
 
 
 def _parse_launchctl_list(text: str) -> dict:

@@ -17,6 +17,7 @@ from .matter_lib import (
     parse_ac_mode,
     AC_MODE_OFF,
 )
+from . import mode_state, mode_http
 
 # Configure logging
 logging.basicConfig(
@@ -428,7 +429,23 @@ def _apply_ac(config, device, now, climate_devices, state_cache):
     state_cache[config['id']] = prev
 
 
-def run_automation(server: str, config_path: str, api_key: str = None):
+def _force_off_all(configs, device_map):
+    """Used when entering kill mode — turn everything off once."""
+    for cfg in configs:
+        dev = device_map.get(cfg['id'])
+        if dev is None:
+            continue
+        try:
+            dev.turn_off()
+            logging.info(f"[{getattr(dev, 'name', cfg['id'])}] KILL → OFF")
+        except Exception as e:
+            logging.warning(f"KILL turn_off failed for {cfg['id']}: {e}")
+
+
+def run_automation(server: str, config_path: str, api_key: str = None,
+                   mode_state_path: str = None,
+                   mode_http_host: str = "127.0.0.1",
+                   mode_http_port: int = 7870):
     dispatcher = CommandDispatcher(rate_limit_delay=0.0)
     controller = MatterController(server_address=server, api_key=api_key)
 
@@ -447,12 +464,41 @@ def run_automation(server: str, config_path: str, api_key: str = None):
             dev.subscribe_occupancy(create_sensor_callback(dev.id))
 
     state_cache = {}
+
+    if mode_state_path:
+        mode_http.start_in_thread(
+            mode_state_path, mode_http_host, mode_http_port,
+            on_change=state_changed_event.set,
+        )
+        logging.info(f"Mode state file: {mode_state_path}")
+
+    prev_kill = False
+    prev_auto = True
     logging.info("System initialized. Entering main loop.")
 
     try:
         while True:
             state_changed_event.wait(timeout=1.0)
             state_changed_event.clear()
+
+            mode = mode_state.load(mode_state_path) if mode_state_path else mode_state.DEFAULT
+            kill = mode["kill"]
+            auto = mode["auto"]
+
+            if kill and not prev_kill:
+                logging.warning("KILL switch engaged — turning all devices off")
+                _force_off_all(configs, device_map)
+                state_cache.clear()
+            elif not auto and prev_auto:
+                logging.info("Auto Mode disabled — schedule paused (devices left as-is)")
+            elif (prev_kill and not kill) or (not prev_auto and auto):
+                logging.info("Resuming automation — clearing state cache for fresh apply")
+                state_cache.clear()
+
+            prev_kill, prev_auto = kill, auto
+
+            if kill or not auto:
+                continue
 
             now = datetime.now()
             current_minutes = now.hour * 60 + now.minute
@@ -481,10 +527,20 @@ def main():
     parser.add_argument("--config", required=True, help="Path to config JSON")
     parser.add_argument("--api-key", default=os.environ.get("MATTER_SRV_KEY"),
                         help="X-API-Key for the matter_webcontrol server (or set MATTER_SRV_KEY)")
+    parser.add_argument("--mode-state", default=os.environ.get("LP_MODE_STATE"),
+                        help="Path to mode-state JSON (auto/kill flags). "
+                             "Required to enable the /mode HTTP endpoint and HomeKit bridge integration.")
+    parser.add_argument("--mode-http-host", default="127.0.0.1",
+                        help="Bind host for the mode HTTP server (default 127.0.0.1; use 0.0.0.0 for LAN).")
+    parser.add_argument("--mode-http-port", type=int, default=7870,
+                        help="Bind port for the mode HTTP server (default 7870).")
     args = parser.parse_args()
 
     try:
-        run_automation(args.server, args.config, api_key=args.api_key)
+        run_automation(args.server, args.config, api_key=args.api_key,
+                       mode_state_path=args.mode_state,
+                       mode_http_host=args.mode_http_host,
+                       mode_http_port=args.mode_http_port)
     except KeyboardInterrupt:
         logging.info("System halted.")
         sys.exit(0)

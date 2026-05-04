@@ -18,10 +18,15 @@ light_programmer/              # Python package
                                  Device list fetched from /api/metadata or loaded from disk (json_path=).
                                  Devices accept an optional dispatcher (callable queue) for serialized execution.
     programmer.py              # Automation engine: CommandDispatcher, light + AC schedules,
-                                 occupancy/climate gating, main 1Hz loop.
+                                 occupancy/climate gating, main 1Hz loop. Honors mode flags
+                                 (auto/kill) loaded each tick from --mode-state JSON.
+    mode_state.py              # Atomic JSON store for {auto, kill} flags shared across processes.
+    mode_http.py               # Tiny stdlib HTTP server: GET/POST /mode, POST /kill.
+                                 Consumed by the homekit-bridge (separate repo).
     genconfig.py               # Auto-generates config JSON from /api/metadata.
     mcp_server.py              # Optional MCP server (FastMCP). Tools for device discovery,
-                                 climate/AC reads, config CRUD with validation, direct control.
+                                 climate/AC reads, config CRUD with validation, direct control,
+                                 and mode-flag get/set.
                                  Installed via `pip install light-programmer[mcp]`,
                                  launched as `light-programmer-mcp` (stdio).
 pyproject.toml                 # Package config, CLI entry points
@@ -54,6 +59,14 @@ sample.json                    # Real-world config example with 11 devices
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
 - **State caching**: Only sends commands when target differs from cached state (brightness ±2,
   color temp >50K threshold, AC setpoint ±0.5°C, AC mode change).
+- **Mode flags** (v0.6.0+): two booleans persisted in `--mode-state` JSON file:
+  - `auto` (default `true`): when `false`, schedule loop is paused and devices left as-is.
+  - `kill` (default `false`): when `true`, every configured device is forced OFF once on
+    transition, then loop stays paused. Clearing kill (or re-enabling auto) clears the
+    state cache so the next tick reapplies fresh schedule values.
+  - HTTP API on `--mode-http-host:--mode-http-port` (default `127.0.0.1:7870`):
+    `GET /mode`, `POST /mode {auto?, kill?}`, `POST /kill {kill}`.
+  - MCP tools: `get_mode(state_path?)`, `set_mode(auto?, kill?, state_path?)`.
 
 ## Running
 
