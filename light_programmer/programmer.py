@@ -429,6 +429,29 @@ def _apply_ac(config, device, now, climate_devices, state_cache):
     state_cache[config['id']] = prev
 
 
+_kill_off_counter = 0
+
+
+def _force_ac_off(dev: ACDevice, cfg: dict) -> None:
+    """Force AC off in a way that guarantees an IR packet is emitted.
+
+    The Aqara IR bridge (and similar Matter→IR gateways) dedup writes when the
+    target attribute equals the cached value, so plain `set_state(on=False)`
+    after a previous off is silently dropped — no IR. Every AC IR command from
+    the gateway is a complete state packet (mode + setpoint + fan), so nudging
+    the setpoint by ±0.5°C against the configured base forces the gateway to
+    emit a fresh packet whose `system_mode=0` actually reaches the unit.
+    Matter-reported state is not trusted here on purpose.
+    """
+    global _kill_off_counter
+    _kill_off_counter += 1
+    base = float(cfg.get('setpoint', 27.0))
+    nudge = 0.5 if (_kill_off_counter % 2) else -0.5
+    setpoint = round(base + nudge, 1)
+    dev.set_state(on=False, setpoint=setpoint)
+    logging.info(f"[{dev.name}] kill OFF (setpoint nudged to {setpoint}°C to force IR)")
+
+
 def _force_off_all(configs, device_map):
     """Used when entering kill mode — turn everything off once."""
     for cfg in configs:
@@ -436,16 +459,19 @@ def _force_off_all(configs, device_map):
         if dev is None:
             continue
         try:
-            dev.turn_off()
-            logging.info(f"[{getattr(dev, 'name', cfg['id'])}] KILL → OFF")
+            if (cfg.get('type') or '').lower() == 'ac' and isinstance(dev, ACDevice):
+                _force_ac_off(dev, cfg)
+            else:
+                dev.turn_off()
+                logging.info(f"[{getattr(dev, 'name', cfg['id'])}] KILL → OFF")
         except Exception as e:
             logging.warning(f"KILL turn_off failed for {cfg['id']}: {e}")
 
 
 def _reassert_acs_off(configs, device_map):
-    """Re-issue turn_off to every AC. Lights stay off on their own; ACs may be
-    flipped on by IR remotes or HomeKit pokes, so we re-enforce hourly while
-    the kill switch is engaged."""
+    """Re-issue OFF to every AC entry hourly while kill is engaged. ACs are
+    the only category we re-poke because lights aren't reachable from IR
+    remotes or other HomeKit clients in the way ACs are."""
     for cfg in configs:
         if (cfg.get('type') or '').lower() != 'ac':
             continue
@@ -453,8 +479,7 @@ def _reassert_acs_off(configs, device_map):
         if not isinstance(dev, ACDevice):
             continue
         try:
-            dev.turn_off()
-            logging.info(f"[{dev.name}] KILL re-assert → OFF")
+            _force_ac_off(dev, cfg)
         except Exception as e:
             logging.warning(f"KILL re-assert failed for {cfg['id']}: {e}")
 
