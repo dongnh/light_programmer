@@ -355,6 +355,148 @@ def read_log(label: str, lines: int = 50, grep: Optional[str] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Repo management — remote git pull + reinstall + restart
+# ---------------------------------------------------------------------------
+
+# Override via env: LP_MCP_REPO_<NAME>_PATH, LP_MCP_REPO_<NAME>_EXTRA, LP_MCP_REPO_<NAME>_RESTART (comma-separated labels)
+_DEFAULT_REPOS = {
+    "light_programmer": {
+        "path":    "/Users/panda/lighting/src/light_programmer",
+        "extra":   "[mcp]",
+        "restart": ["home.lighting.programmer", "home.lighting.mcp_programmer"],
+    },
+    "matter_webcontrol": {
+        "path":    "/Users/panda/lighting/src/matter_webcontrol",
+        "extra":   "",
+        "restart": ["home.lighting.matter", "home.lighting.mcp_matter"],
+    },
+}
+
+
+def _repo_config(name: str) -> Optional[dict]:
+    if name not in _DEFAULT_REPOS:
+        return None
+    cfg = dict(_DEFAULT_REPOS[name])
+    cfg["path"]    = os.environ.get(f"LP_MCP_REPO_{name.upper()}_PATH",    cfg["path"])
+    cfg["extra"]   = os.environ.get(f"LP_MCP_REPO_{name.upper()}_EXTRA",   cfg["extra"])
+    restart_env = os.environ.get(f"LP_MCP_REPO_{name.upper()}_RESTART")
+    if restart_env is not None:
+        cfg["restart"] = [s.strip() for s in restart_env.split(",") if s.strip()]
+    cfg["pip"] = os.environ.get("LP_MCP_PIP", "/Users/panda/lighting/.venv-matter/bin/pip")
+    return cfg
+
+
+def _git(args: list, cwd: str, timeout: int = 60) -> dict:
+    rc = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    return {"cmd": "git " + " ".join(args), "rc": rc.returncode,
+            "stdout": rc.stdout.strip(), "stderr": rc.stderr.strip()}
+
+
+@mcp.tool()
+def list_managed_repos() -> list[str]:
+    """Repositories this MCP server can pull/install/restart on the server."""
+    return sorted(_DEFAULT_REPOS)
+
+
+@mcp.tool()
+def get_repo_status(name: str) -> dict:
+    """Show current branch, HEAD commit, and any uncommitted/unpushed changes."""
+    cfg = _repo_config(name)
+    if cfg is None:
+        return {"ok": False, "error": f"unknown repo '{name}'", "allowed": sorted(_DEFAULT_REPOS)}
+    if not os.path.isdir(os.path.join(cfg["path"], ".git")):
+        return {"ok": False, "error": f"not a git repo: {cfg['path']}"}
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cfg["path"])
+    head   = _git(["log", "-1", "--oneline"], cfg["path"])
+    status = _git(["status", "-s"], cfg["path"])
+    upstream = _git(["rev-list", "--left-right", "--count", "@{u}...HEAD"], cfg["path"])
+    behind, ahead = (None, None)
+    if upstream["rc"] == 0 and upstream["stdout"]:
+        try:
+            behind, ahead = [int(x) for x in upstream["stdout"].split()]
+        except ValueError:
+            pass
+    return {
+        "ok": True, "name": name, "path": cfg["path"],
+        "branch": branch["stdout"], "head": head["stdout"],
+        "dirty": bool(status["stdout"]),
+        "behind_remote": behind, "ahead_remote": ahead,
+    }
+
+
+@mcp.tool()
+def update_repo(name: str, restart: bool = True, reinstall: bool = True) -> dict:
+    """`git fetch && git pull --ff-only`, then pip install -e (with optional extra),
+    then optionally restart the related launchd services. Returns each step's output.
+
+    Notes:
+      - Refuses to pull a dirty tree (uncommitted changes); fix manually first.
+      - When restarting `home.lighting.mcp_programmer` (the service hosting this very
+        tool), the kickstart is delayed 2 seconds so the response can return before
+        the worker is killed; the service will respawn from KeepAlive.
+    """
+    cfg = _repo_config(name)
+    if cfg is None:
+        return {"ok": False, "error": f"unknown repo '{name}'", "allowed": sorted(_DEFAULT_REPOS)}
+    if not os.path.isdir(os.path.join(cfg["path"], ".git")):
+        return {"ok": False, "error": f"not a git repo: {cfg['path']}"}
+
+    steps: list[dict] = []
+
+    dirty = _git(["status", "--porcelain"], cfg["path"])
+    steps.append({"step": "git status", **dirty})
+    if dirty["rc"] != 0:
+        return {"ok": False, "error": "git status failed", "steps": steps}
+    if dirty["stdout"]:
+        return {"ok": False, "error": "working tree is dirty; refusing to pull",
+                "uncommitted": dirty["stdout"], "steps": steps}
+
+    fetch = _git(["fetch", "--tags", "origin"], cfg["path"], timeout=120)
+    steps.append({"step": "git fetch", **fetch})
+    pull  = _git(["pull", "--ff-only", "origin", "HEAD"], cfg["path"], timeout=120)
+    steps.append({"step": "git pull --ff-only", **pull})
+    if pull["rc"] != 0:
+        return {"ok": False, "error": "git pull failed", "steps": steps}
+
+    if reinstall:
+        target = cfg["path"] + cfg["extra"]
+        rc = subprocess.run(
+            [cfg["pip"], "install", "-e", target, "--quiet"],
+            capture_output=True, text=True, timeout=180,
+        )
+        steps.append({"step": "pip install -e", "rc": rc.returncode,
+                      "stdout": rc.stdout.strip()[-2000:], "stderr": rc.stderr.strip()[-2000:]})
+        if rc.returncode != 0:
+            return {"ok": False, "error": "pip install failed", "steps": steps}
+
+    if restart:
+        uid = os.getuid()
+        own_label = "home.lighting.mcp_programmer"
+        for label in cfg["restart"]:
+            if label not in ALLOWED_LABELS:
+                steps.append({"step": f"skip restart {label}", "reason": "label not whitelisted"})
+                continue
+            if label == own_label:
+                # Defer self-restart so the response can return.
+                subprocess.Popen(
+                    ["bash", "-c",
+                     f"sleep 2 && launchctl kickstart -k gui/{uid}/{label}"],
+                    start_new_session=True,
+                )
+                steps.append({"step": f"restart {label}", "deferred": True, "delay_s": 2})
+            else:
+                rc = subprocess.run(
+                    ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                steps.append({"step": f"restart {label}", "rc": rc.returncode,
+                              "stdout": rc.stdout.strip(), "stderr": rc.stderr.strip()})
+
+    return {"ok": True, "name": name, "head": _git(['log', '-1', '--oneline'], cfg["path"])['stdout'],
+            "steps": steps}
+
+
+# ---------------------------------------------------------------------------
 # Documentation prompt — bundles the schema so agents can author entries.
 # ---------------------------------------------------------------------------
 
