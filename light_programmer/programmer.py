@@ -356,8 +356,26 @@ def _apply_ac(config, device, now, climate_devices, state_cache):
 
     primary_temp = temps[0] if temps else None
 
-    prev = state_cache.get(config['id'],
-                           {'on': False, 'mode': None, 'setpoint': None, 'occupied_since': None})
+    if config['id'] not in state_cache:
+        # Seed from real device state so a programmer restart while the AC is
+        # already running can still drive it off when conditions say so.
+        try:
+            actual = device.read_state() or {}
+            seeded_on = bool(actual.get('on'))
+            seeded_mode = actual.get('system_mode') if seeded_on else AC_MODE_OFF
+            seeded_sp = actual.get('cooling_setpoint') if seeded_on else None
+            logging.info(
+                f"[{device.name}] AC initial state: on={seeded_on}, "
+                f"mode={seeded_mode}, setpoint={seeded_sp}"
+            )
+        except Exception as e:
+            logging.warning(f"[{device.name}] AC initial read failed: {e}")
+            seeded_on, seeded_mode, seeded_sp = False, None, None
+        state_cache[config['id']] = {
+            'on': seeded_on, 'mode': seeded_mode,
+            'setpoint': seeded_sp, 'occupied_since': None,
+        }
+    prev = state_cache[config['id']]
 
     # Continuous-occupancy debounce: AC only turns on after motion has been satisfied
     # for `on_delay_minutes` (default 5) without interruption.
