@@ -405,12 +405,25 @@ def main():  # entry point for `light-programmer-mcp`
         mcp.run()
         return
 
-    # FastMCP's settings host/port (bind address for the HTTP server).
+    # FastMCP bind address.
     try:
         mcp.settings.host = args.host
         mcp.settings.port = args.port
     except AttributeError:
         logging.warning("FastMCP.settings unavailable; relying on transport defaults.")
+
+    # MCP SDK enables DNS-rebinding protection by default, which only trusts
+    # 127.0.0.1/localhost. For LAN deployments the operator is explicitly
+    # opting in to network exposure, so we relax the host/origin filter.
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        )
+    except Exception as e:  # pragma: no cover
+        logging.warning(f"Could not relax transport_security ({e}); "
+                        f"requests may be rejected with 'Invalid Host header'.")
+
     transport_name = "streamable-http" if args.transport == "http" else "sse"
     logging.info(f"Starting MCP transport={transport_name} bind={args.host}:{args.port}")
     mcp.run(transport=transport_name)
