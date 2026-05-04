@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "light-programmer"
-version = "0.5.1"
+version = "0.5.2"
 description = "Ecosystem-agnostic smart home lighting & AC automation using Matter protocol"
 readme = "README.md"
 license = {text = "MIT"}

@@ -265,13 +265,16 @@ def set_ac(server: str, ac_id: str, on: bool, mode: str = "cool",
 # ---------------------------------------------------------------------------
 
 # Override via env: LP_MCP_LABELS="home.lighting.programmer,home.lighting.matter"
-_DEFAULT_LABELS = "home.lighting.programmer,home.lighting.matter"
+_DEFAULT_LABELS = ("home.lighting.programmer,home.lighting.matter,"
+                   "home.lighting.mcp_programmer,home.lighting.mcp_matter")
 ALLOWED_LABELS = {s.strip() for s in os.environ.get("LP_MCP_LABELS", _DEFAULT_LABELS).split(",") if s.strip()}
 
 # Map label -> log path. Override via env: LP_MCP_LOG_<label_uppercased_with_underscores>
 _DEFAULT_LOGS = {
-    "home.lighting.programmer": "/Users/panda/lighting/logs/programmer.log",
-    "home.lighting.matter":     "/Users/panda/lighting/logs/matter.log",
+    "home.lighting.programmer":     "/Users/panda/lighting/logs/programmer.log",
+    "home.lighting.matter":         "/Users/panda/lighting/logs/matter.log",
+    "home.lighting.mcp_programmer": "/Users/panda/lighting/logs/mcp_programmer.log",
+    "home.lighting.mcp_matter":     "/Users/panda/lighting/logs/mcp_matter.log",
 }
 LOG_PATHS = {
     label: os.environ.get(f"LP_MCP_LOG_{label.upper().replace('.', '_')}", default)
