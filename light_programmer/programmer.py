@@ -442,6 +442,26 @@ def _force_off_all(configs, device_map):
             logging.warning(f"KILL turn_off failed for {cfg['id']}: {e}")
 
 
+def _reassert_acs_off(configs, device_map):
+    """Re-issue turn_off to every AC. Lights stay off on their own; ACs may be
+    flipped on by IR remotes or HomeKit pokes, so we re-enforce hourly while
+    the kill switch is engaged."""
+    for cfg in configs:
+        if (cfg.get('type') or '').lower() != 'ac':
+            continue
+        dev = device_map.get(cfg['id'])
+        if not isinstance(dev, ACDevice):
+            continue
+        try:
+            dev.turn_off()
+            logging.info(f"[{dev.name}] KILL re-assert → OFF")
+        except Exception as e:
+            logging.warning(f"KILL re-assert failed for {cfg['id']}: {e}")
+
+
+KILL_AC_REASSERT_INTERVAL = timedelta(hours=1)
+
+
 def run_automation(server: str, config_path: str, api_key: str = None,
                    mode_state_path: str = None,
                    mode_http_host: str = "127.0.0.1",
@@ -474,6 +494,7 @@ def run_automation(server: str, config_path: str, api_key: str = None,
 
     prev_kill = False
     prev_auto = True
+    kill_ac_next_reassert = None
     logging.info("System initialized. Entering main loop.")
 
     try:
@@ -484,23 +505,30 @@ def run_automation(server: str, config_path: str, api_key: str = None,
             mode = mode_state.load(mode_state_path) if mode_state_path else mode_state.DEFAULT
             kill = mode["kill"]
             auto = mode["auto"]
+            now = datetime.now()
 
             if kill and not prev_kill:
                 logging.warning("KILL switch engaged — turning all devices off")
                 _force_off_all(configs, device_map)
                 state_cache.clear()
+                kill_ac_next_reassert = now + KILL_AC_REASSERT_INTERVAL
             elif not auto and prev_auto:
                 logging.info("Auto Mode disabled — schedule paused (devices left as-is)")
             elif (prev_kill and not kill) or (not prev_auto and auto):
                 logging.info("Resuming automation — clearing state cache for fresh apply")
                 state_cache.clear()
+                kill_ac_next_reassert = None
 
             prev_kill, prev_auto = kill, auto
 
-            if kill or not auto:
+            if kill:
+                if kill_ac_next_reassert and now >= kill_ac_next_reassert:
+                    _reassert_acs_off(configs, device_map)
+                    kill_ac_next_reassert = now + KILL_AC_REASSERT_INTERVAL
+                continue
+            if not auto:
                 continue
 
-            now = datetime.now()
             current_minutes = now.hour * 60 + now.minute
 
             for config in configs:

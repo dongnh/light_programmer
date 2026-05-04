@@ -64,6 +64,8 @@ sample.json                    # Real-world config example with 11 devices
   - `kill` (default `false`): when `true`, every configured device is forced OFF once on
     transition, then loop stays paused. Clearing kill (or re-enabling auto) clears the
     state cache so the next tick reapplies fresh schedule values.
+    While kill stays engaged, AC entries are re-asserted OFF every hour
+    (`KILL_AC_REASSERT_INTERVAL`) to defend against IR-remote / external pokes.
   - HTTP API on `--mode-http-host:--mode-http-port` (default `127.0.0.1:7870`):
     `GET /mode`, `POST /mode {auto?, kill?}`, `POST /kill {kill}`.
   - MCP tools: `get_mode(state_path?)`, `set_mode(auto?, kill?, state_path?)`.
