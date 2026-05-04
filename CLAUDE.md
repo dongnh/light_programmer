@@ -20,6 +20,10 @@ light_programmer/              # Python package
     programmer.py              # Automation engine: CommandDispatcher, light + AC schedules,
                                  occupancy/climate gating, main 1Hz loop.
     genconfig.py               # Auto-generates config JSON from /api/metadata.
+    mcp_server.py              # Optional MCP server (FastMCP). Tools for device discovery,
+                                 climate/AC reads, config CRUD with validation, direct control.
+                                 Installed via `pip install light-programmer[mcp]`,
+                                 launched as `light-programmer-mcp` (stdio).
 pyproject.toml                 # Package config, CLI entry points
 sample.json                    # Real-world config example with 11 devices
 ```

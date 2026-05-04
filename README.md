@@ -142,6 +142,41 @@ In the dead band between `off_below` and `on_above` the AC holds its previous st
 
 The same `sensor` / `sensor_condition` AST used by lights applies — combine multiple occupancy sensors with `AND`/`OR`/`NOT` as needed. If the climate sensor is unreachable, the AC holds its last decision rather than flapping.
 
+## MCP Server (AI Agent Configuration)
+
+An MCP server is bundled so AI agents (Claude Desktop, Claude Code, etc.) can discover devices and edit the config for you.
+
+```bash
+pip install light-programmer[mcp]
+light-programmer-mcp                  # stdio transport
+```
+
+Example Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "light-programmer": {
+      "command": "light-programmer-mcp",
+      "env": { "MATTER_SRV_KEY": "your-api-key" }
+    }
+  }
+}
+```
+
+Tools exposed:
+
+| Tool | Purpose |
+|------|---------|
+| `list_devices` | Discover lights / sensors / climate / AC from `/api/metadata` |
+| `read_climate`, `read_ac_state`, `read_status` | Live readings |
+| `read_config`, `write_config`, `validate_config` | Whole-file CRUD with schema validation |
+| `upsert_entry`, `remove_entry` | Per-entry edits keyed by device id |
+| `set_light`, `set_ac` | Direct device control for quick tests |
+| `config_schema` (prompt) | Schema reference an agent can pull when authoring entries |
+
+Validation rejects writes with bad time formats, out-of-range levels/Kelvin, missing thresholds, or hysteresis bands where `off_below ≥ on_above` (cool) / `off_above ≤ on_below` (heat).
+
 ## Project Structure
 
 | File | Purpose |
@@ -149,6 +184,7 @@ The same `sensor` / `sensor_condition` AST used by lights applies — combine mu
 | `light_programmer/programmer.py` | Main automation controller — runs the 1Hz loop for lights and ACs |
 | `light_programmer/matter_lib.py` | Device abstractions: `LightDevice`, `SensorDevice`, `ClimateSensorDevice`, `ACDevice` |
 | `light_programmer/genconfig.py` | Generates config JSON from hardware discovery |
+| `light_programmer/mcp_server.py` | MCP server exposing discovery + config CRUD tools to AI agents |
 | `sample.json` | Example configuration with 11 devices |
 | `pyproject.toml` | Package configuration and CLI entry points |
 

@@ -10,6 +10,10 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
 [project.scripts]
 light-programmer = "light_programmer.programmer:main"
 light-genconfig = "light_programmer.genconfig:main"
+light-programmer-mcp = "light_programmer.mcp_server:main"
