@@ -1,19 +1,22 @@
 """MCP server for Light Programmer.
 
 Exposes tools for AI agents to discover Matter devices, inspect current state,
-and read/write the automation config JSON. Direct device control is also
-available for quick experimentation.
+manage launchd services (programmer + matter controller), tail their logs,
+read/write the automation config, and control devices directly.
 
 Run:
     pip install light-programmer[mcp]
-    light-programmer-mcp                       # stdio transport (for Claude Desktop / Code)
+    light-programmer-mcp                                      # stdio (for Claude Desktop / Code)
+    light-programmer-mcp --transport http --host 0.0.0.0 --port 7860   # LAN access
 """
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
 import re
+import subprocess
 from typing import Any, Optional
 
 try:
@@ -258,6 +261,100 @@ def set_ac(server: str, ac_id: str, on: bool, mode: str = "cool",
 
 
 # ---------------------------------------------------------------------------
+# Process / log management (launchd, macOS)
+# ---------------------------------------------------------------------------
+
+# Override via env: LP_MCP_LABELS="home.lighting.programmer,home.lighting.matter"
+_DEFAULT_LABELS = "home.lighting.programmer,home.lighting.matter"
+ALLOWED_LABELS = {s.strip() for s in os.environ.get("LP_MCP_LABELS", _DEFAULT_LABELS).split(",") if s.strip()}
+
+# Map label -> log path. Override via env: LP_MCP_LOG_<label_uppercased_with_underscores>
+_DEFAULT_LOGS = {
+    "home.lighting.programmer": "/Users/panda/lighting/logs/programmer.log",
+    "home.lighting.matter":     "/Users/panda/lighting/logs/matter.log",
+}
+LOG_PATHS = {
+    label: os.environ.get(f"LP_MCP_LOG_{label.upper().replace('.', '_')}", default)
+    for label, default in _DEFAULT_LOGS.items()
+}
+
+
+def _parse_launchctl_list(text: str) -> dict:
+    pid, last_exit = None, None
+    for line in text.splitlines():
+        s = line.strip().rstrip(";")
+        if s.startswith('"PID" = '):
+            try: pid = int(s.split("=", 1)[1].strip())
+            except ValueError: pass
+        elif s.startswith('"LastExitStatus" = '):
+            try: last_exit = int(s.split("=", 1)[1].strip())
+            except ValueError: pass
+    return {"pid": pid, "last_exit_status": last_exit}
+
+
+@mcp.tool()
+def list_managed_services() -> list[str]:
+    """List launchd labels this MCP server is allowed to inspect/restart."""
+    return sorted(ALLOWED_LABELS)
+
+
+@mcp.tool()
+def get_service_status(label: str) -> dict:
+    """Get launchd status for a managed service. PID null = not running."""
+    if label not in ALLOWED_LABELS:
+        return {"ok": False, "error": f"label '{label}' not allowed", "allowed": sorted(ALLOWED_LABELS)}
+    rc = subprocess.run(["launchctl", "list", label], capture_output=True, text=True, timeout=5)
+    if rc.returncode != 0:
+        return {"ok": False, "label": label, "stderr": rc.stderr.strip()}
+    parsed = _parse_launchctl_list(rc.stdout)
+    return {"ok": True, "label": label, "running": parsed["pid"] is not None, **parsed}
+
+
+@mcp.tool()
+def restart_service(label: str) -> dict:
+    """Kickstart-restart a managed launchd service (`launchctl kickstart -k`).
+
+    Returns post-restart status after a short settle delay so callers can confirm
+    the service came back up. Note: restarting `home.lighting.matter` will cause
+    the programmer to lose its API connection briefly; KeepAlive will respawn it.
+    """
+    if label not in ALLOWED_LABELS:
+        return {"ok": False, "error": f"label '{label}' not allowed", "allowed": sorted(ALLOWED_LABELS)}
+    uid = os.getuid()
+    rc = subprocess.run(
+        ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    import time
+    time.sleep(1.5)
+    status = get_service_status(label)
+    return {"ok": rc.returncode == 0, "label": label,
+            "stdout": rc.stdout.strip(), "stderr": rc.stderr.strip(),
+            "post_restart": status}
+
+
+@mcp.tool()
+def read_log(label: str, lines: int = 50, grep: Optional[str] = None) -> str:
+    """Tail the log file for a managed service. `grep` is a regex; non-matching
+    lines are filtered out. `lines` is clamped to [1, 2000]."""
+    path = LOG_PATHS.get(label)
+    if path is None:
+        return f"label '{label}' not in log map; allowed: {sorted(LOG_PATHS)}"
+    n = max(1, min(2000, int(lines)))
+    rc = subprocess.run(["tail", "-n", str(n), path], capture_output=True, text=True, timeout=5)
+    if rc.returncode != 0:
+        return f"tail failed: {rc.stderr.strip()}"
+    text = rc.stdout
+    if grep:
+        try:
+            pat = re.compile(grep)
+        except re.error as e:
+            return f"invalid regex: {e}"
+        text = "\n".join(line for line in text.splitlines() if pat.search(line))
+    return text
+
+
+# ---------------------------------------------------------------------------
 # Documentation prompt — bundles the schema so agents can author entries.
 # ---------------------------------------------------------------------------
 
@@ -295,7 +392,28 @@ AC bring-down: temp crosses off threshold OR occupancy fails OR outside window.
 
 
 def main():  # entry point for `light-programmer-mcp`
-    mcp.run()
+    p = argparse.ArgumentParser(description="Light Programmer MCP server")
+    p.add_argument("--transport", default="stdio", choices=["stdio", "sse", "http"],
+                   help="Transport: stdio for local AI agents (default), sse/http for LAN access.")
+    p.add_argument("--host", default="127.0.0.1",
+                   help="Bind host for sse/http (default 127.0.0.1; use 0.0.0.0 for LAN).")
+    p.add_argument("--port", type=int, default=7860,
+                   help="Bind port for sse/http (default 7860).")
+    args = p.parse_args()
+
+    if args.transport == "stdio":
+        mcp.run()
+        return
+
+    # FastMCP's settings host/port (bind address for the HTTP server).
+    try:
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+    except AttributeError:
+        logging.warning("FastMCP.settings unavailable; relying on transport defaults.")
+    transport_name = "streamable-http" if args.transport == "http" else "sse"
+    logging.info(f"Starting MCP transport={transport_name} bind={args.host}:{args.port}")
+    mcp.run(transport=transport_name)
 
 
 if __name__ == "__main__":
