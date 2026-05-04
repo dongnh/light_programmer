@@ -1,6 +1,6 @@
 # Home Lighting Programmer
 
-Ecosystem-agnostic smart home lighting automation using the Matter protocol. Replaces physical switches with sensor-driven control and supports circadian rhythm alignment through dynamic color temperature and brightness scheduling.
+Ecosystem-agnostic smart home automation using the Matter protocol. Replaces physical switches with sensor-driven control of **lights** (circadian-aware brightness + color temperature schedules) and **air conditioners** (temperature-driven hysteresis with occupancy gating).
 
 > **Note:** For domestic use only. Not hardened for production/commercial deployment.
 
@@ -113,12 +113,41 @@ For complex scenarios, use `sensor_condition` instead of `sensor`. It supports a
 
 During 06:00-22:00 the light follows its schedule regardless of sensors. Outside that window, it only turns on when the sensor detects motion.
 
+## Air Conditioner Control
+
+AC entries are temperature-driven (no time schedule). They use a Matter thermostat (`/api/ac`) plus a separate climate sensor (`/api/climate`) for the ambient reading.
+
+```jsonc
+{
+    "id": "dev_ac_livingroom",
+    "type": "ac",                          // marks this entry as an AC
+    "climate_sensor": "dev_temp_livingroom",
+    "mode": "cool",                        // cool / heat / dry / fan / auto
+    "setpoint": 26.0,                      // °C sent to the thermostat
+    "on_above": 29.0,                      // turn on when ambient ≥ 29 °C
+    "off_below": 26.5,                     // turn off when ambient ≤ 26.5 °C
+    "on_delay_minutes": 5,                 // require continuous occupancy ≥ 5 min before turning on
+    "active_window": {"start": "10:00", "end": "23:30"},
+    "sensor": [
+        {"id": "dev_occ_livingroom", "timeout": 15}
+    ]
+}
+```
+
+**Bring-up rule** (off → on): ambient ≥ `on_above` **AND** occupancy continuously satisfied for `on_delay_minutes` **AND** time within `active_window`.
+
+**Bring-down rule** (on → off): ambient ≤ `off_below`, **OR** occupancy fails (after each sensor's `timeout` hold), **OR** outside `active_window`.
+
+In the dead band between `off_below` and `on_above` the AC holds its previous state — this is the hysteresis. For `mode: "heat"`, swap to `on_below` / `off_above` (turn on when cold enough, off when warm enough).
+
+The same `sensor` / `sensor_condition` AST used by lights applies — combine multiple occupancy sensors with `AND`/`OR`/`NOT` as needed. If the climate sensor is unreachable, the AC holds its last decision rather than flapping.
+
 ## Project Structure
 
 | File | Purpose |
 |------|---------|
-| `light_programmer/programmer.py` | Main automation controller - runs the 1Hz loop |
-| `light_programmer/matter_lib.py` | Device abstraction layer (lights, sensors, controller) |
+| `light_programmer/programmer.py` | Main automation controller — runs the 1Hz loop for lights and ACs |
+| `light_programmer/matter_lib.py` | Device abstractions: `LightDevice`, `SensorDevice`, `ClimateSensorDevice`, `ACDevice` |
 | `light_programmer/genconfig.py` | Generates config JSON from hardware discovery |
 | `sample.json` | Example configuration with 11 devices |
 | `pyproject.toml` | Package configuration and CLI entry points |

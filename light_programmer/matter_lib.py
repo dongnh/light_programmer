@@ -114,8 +114,114 @@ class SensorDevice(MatterDevice):
         return listener_thread
 
 
+class ClimateSensorDevice(MatterDevice):
+    """Temperature/humidity sensor (read via /api/climate?id=...)."""
+
+    def read_climate(self) -> dict:
+        """Return {'temperature': °C, 'humidity': %} (keys may be missing)."""
+        data = self.client.get("/api/climate", {"id": self.id})
+        # /api/climate?id= returns the device record directly.
+        if isinstance(data, dict) and "devices" in data:
+            for d in data.get("devices", []):
+                if d.get("id") == self.id:
+                    return d
+            return {}
+        return data or {}
+
+    def read_temperature(self):
+        return self.read_climate().get("temperature")
+
+    def read_humidity(self):
+        return self.read_climate().get("humidity")
+
+
+# Matter Thermostat system_mode values.
+AC_MODE_OFF = 0
+AC_MODE_AUTO = 1
+AC_MODE_COOL = 3
+AC_MODE_HEAT = 4
+AC_MODE_FAN = 7
+AC_MODE_DRY = 8
+
+AC_MODE_NAMES = {
+    "off": AC_MODE_OFF,
+    "auto": AC_MODE_AUTO,
+    "cool": AC_MODE_COOL,
+    "heat": AC_MODE_HEAT,
+    "fan": AC_MODE_FAN,
+    "fan_only": AC_MODE_FAN,
+    "dry": AC_MODE_DRY,
+}
+
+
+def parse_ac_mode(mode) -> int:
+    if isinstance(mode, int):
+        return mode
+    if isinstance(mode, str):
+        return AC_MODE_NAMES.get(mode.lower(), AC_MODE_OFF)
+    return AC_MODE_OFF
+
+
+class ACDevice(MatterDevice):
+    """AC / Thermostat — Matter cluster 0x0201, controlled via /api/ac."""
+
+    def read_state(self) -> dict:
+        return self.client.get("/api/ac", {"id": self.id}) or {}
+
+    def set_state(self, on: bool = None, mode=None, setpoint: float = None):
+        payload = {"id": self.id}
+        if on is not None:
+            payload["on"] = bool(on)
+        if mode is not None:
+            payload["mode"] = parse_ac_mode(mode)
+        if setpoint is not None:
+            payload["setpoint"] = float(setpoint)
+        return self._dispatch(lambda: self.client.post("/api/ac", payload))
+
+    def turn_on(self, mode=AC_MODE_COOL, setpoint: float = None):
+        return self.set_state(on=True, mode=mode, setpoint=setpoint)
+
+    def turn_off(self):
+        return self.set_state(on=False, mode=AC_MODE_OFF)
+
+    def set_mode(self, mode):
+        return self.set_state(mode=mode)
+
+    def set_setpoint(self, setpoint: float):
+        return self.set_state(setpoint=setpoint)
+
+
+def _classify(dev_config: dict) -> str:
+    hw = (dev_config.get("hardware_type") or "").lower()
+    caps = [str(c).lower() for c in dev_config.get("capabilities", [])]
+    states = dev_config.get("states", {}) or {}
+
+    if ("thermostat" in hw or "ac" in hw or "air_conditioner" in hw
+            or "thermostat" in caps or "system_mode" in caps
+            or "system_mode" in states or "cooling_setpoint" in states
+            or "heating_setpoint" in states):
+        return "ac"
+    if ("temperature" in caps or "humidity" in caps
+            or "climate" in hw or "temperature" in states or "humidity" in states):
+        # Pure climate sensors (no occupancy capability).
+        if "occupancy" not in caps:
+            return "climate"
+    if "sensor" in hw or "occupancy" in caps:
+        return "sensor"
+    if "light" in hw or "on_off" in caps or "brightness" in caps:
+        return "light"
+    return "unknown"
+
+
 class MatterController:
     """Loads device list from matter_webcontrol /api/metadata or a JSON file."""
+
+    DEVICE_CLASSES = {
+        "light": LightDevice,
+        "sensor": SensorDevice,
+        "climate": ClimateSensorDevice,
+        "ac": ACDevice,
+    }
 
     def __init__(self, server_address: str = None, json_path: str = None,
                  api_key: str = None, client: MatterClient = None):
@@ -135,16 +241,12 @@ class MatterController:
 
         self.devices = {}
         for dev_config in data.get("devices", []):
-            hw_type = (dev_config.get("hardware_type") or "").lower()
-            caps = dev_config.get("capabilities", [])
-            is_sensor = "sensor" in hw_type or "occupancy" in caps
-            is_light = "light" in hw_type or "on_off" in caps or "brightness" in caps
-
+            kind = _classify(dev_config)
+            cls = self.DEVICE_CLASSES.get(kind)
+            if cls is None:
+                continue
             key = dev_config.get("name") or dev_config.get("id")
-            if is_sensor:
-                self.devices[key] = SensorDevice(dev_config, self.client)
-            elif is_light:
-                self.devices[key] = LightDevice(dev_config, self.client)
+            self.devices[key] = cls(dev_config, self.client)
 
     def _fetch_from_api(self) -> dict:
         logging.info(f"Fetching device metadata from {self.client.base_url}/api/metadata")

@@ -11,12 +11,14 @@ Distributed as PyPI package `light-programmer`.
 ```
 light_programmer/              # Python package
     __init__.py                # version
-    matter_lib.py              # MatterClient (HTTP+X-API-Key), MatterDevice, LightDevice, SensorDevice, MatterController.
-                                 Talks REST to matter_webcontrol: /api/level, /api/mired, /api/toggle, /api/subscribe (SSE).
-                                 Device list fetched from /api/metadata (server_address=) or loaded from disk (json_path=).
+    matter_lib.py              # MatterClient (HTTP+X-API-Key), MatterDevice, LightDevice, SensorDevice,
+                                 ClimateSensorDevice, ACDevice, MatterController.
+                                 REST endpoints used: /api/level, /api/mired, /api/toggle, /api/ac,
+                                 /api/climate, /api/subscribe (SSE).
+                                 Device list fetched from /api/metadata or loaded from disk (json_path=).
                                  Devices accept an optional dispatcher (callable queue) for serialized execution.
-    programmer.py              # Automation engine: CommandDispatcher (callable queue), scheduling, sensor logic, main 1Hz loop.
-                                 Imports device classes from matter_lib.
+    programmer.py              # Automation engine: CommandDispatcher, light + AC schedules,
+                                 occupancy/climate gating, main 1Hz loop.
     genconfig.py               # Auto-generates config JSON from /api/metadata.
 pyproject.toml                 # Package config, CLI entry points
 sample.json                    # Real-world config example with 11 devices
@@ -24,12 +26,23 @@ sample.json                    # Real-world config example with 11 devices
 
 ## Key Concepts
 
-- **Schedule**: Array of `{time, level, kelvin}` points. Values are linearly interpolated between points. Cross-midnight supported.
-- **Sensor logic**: Two modes:
-  - Simple: `"sensor": [{id, timeout}]` — any sensor active = light on.
+- **Light schedule**: Array of `{time, level, kelvin}` points. Linearly interpolated. Cross-midnight supported.
+- **AC entry**: `"type": "ac"` with fields `climate_sensor`, `mode` (`cool`/`heat`/`dry`/`fan`/`auto`),
+  `setpoint` (°C). Temperature-driven hysteresis:
+  - cool/dry/fan/auto: `on_above` (turn on °C), `off_below` (turn off °C).
+  - heat: `on_below`, `off_above`.
+  Optional `active_window: {start, end}` restricts operating hours; `sensor`/`sensor_condition`
+  gate by occupancy. AC is forced OFF when occupancy fails or outside window. Missing temperature
+  reading holds the previous decision.
+- **AC on-delay**: `on_delay_minutes` (default 5) — occupancy must be continuously satisfied for
+  this many minutes before the AC is allowed to turn on. Resets if occupancy lapses. Once on,
+  the AC stays on regardless of this delay (it only gates the transition off→on).
+- **Sensor logic**: Two modes (apply to both lights and ACs):
+  - Simple: `"sensor": [{id, timeout}]` — any sensor active = device enabled.
   - Advanced: `"sensor_condition"` — AST with `AND`, `OR`, `NOT`, `sensor`, `time_window` nodes.
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
-- **State caching**: Only sends commands when target differs from cached state (brightness ±2, color temp >50K threshold).
+- **State caching**: Only sends commands when target differs from cached state (brightness ±2,
+  color temp >50K threshold, AC setpoint ±0.5°C, AC mode change).
 
 ## Running
 
