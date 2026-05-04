@@ -363,11 +363,13 @@ _DEFAULT_REPOS = {
     "light_programmer": {
         "path":    "/Users/panda/lighting/src/light_programmer",
         "extra":   "[mcp]",
+        "package": "light-programmer",
         "restart": ["home.lighting.programmer", "home.lighting.mcp_programmer"],
     },
     "matter_webcontrol": {
         "path":    "/Users/panda/lighting/src/matter_webcontrol",
         "extra":   "",
+        "package": "matter-web-controller",
         "restart": ["home.lighting.matter", "home.lighting.mcp_matter"],
     },
 }
@@ -390,6 +392,17 @@ def _git(args: list, cwd: str, timeout: int = 60) -> dict:
     rc = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
     return {"cmd": "git " + " ".join(args), "rc": rc.returncode,
             "stdout": rc.stdout.strip(), "stderr": rc.stderr.strip()}
+
+
+def _pip_version(pip: str, package: str) -> Optional[str]:
+    """Return the installed version string for `package` (or None if not installed)."""
+    rc = subprocess.run([pip, "show", package], capture_output=True, text=True, timeout=10)
+    if rc.returncode != 0:
+        return None
+    for line in rc.stdout.splitlines():
+        if line.lower().startswith("version:"):
+            return line.split(":", 1)[1].strip()
+    return None
 
 
 @mcp.tool()
@@ -416,24 +429,52 @@ def get_repo_status(name: str) -> dict:
             behind, ahead = [int(x) for x in upstream["stdout"].split()]
         except ValueError:
             pass
+    described = _git(["describe", "--tags", "--always", "--dirty"], cfg["path"])
+    installed = _pip_version(cfg["pip"], cfg.get("package", ""))
     return {
         "ok": True, "name": name, "path": cfg["path"],
         "branch": branch["stdout"], "head": head["stdout"],
+        "describe": described["stdout"],
+        "installed_version": installed,
         "dirty": bool(status["stdout"]),
         "behind_remote": behind, "ahead_remote": ahead,
     }
 
 
 @mcp.tool()
-def update_repo(name: str, restart: bool = True, reinstall: bool = True) -> dict:
-    """`git fetch && git pull --ff-only`, then pip install -e (with optional extra),
-    then optionally restart the related launchd services. Returns each step's output.
+def list_repo_tags(name: str, limit: int = 20) -> dict:
+    """List the most recent N tags published to the repo's remote, newest first."""
+    cfg = _repo_config(name)
+    if cfg is None:
+        return {"ok": False, "error": f"unknown repo '{name}'"}
+    fetch = _git(["fetch", "--tags", "origin"], cfg["path"], timeout=120)
+    listed = _git(["tag", "--sort=-v:refname"], cfg["path"])
+    if listed["rc"] != 0:
+        return {"ok": False, "error": "git tag failed", "fetch": fetch, "listing": listed}
+    tags = [t for t in listed["stdout"].splitlines() if t][: max(1, int(limit))]
+    return {"ok": True, "name": name, "tags": tags}
+
+
+@mcp.tool()
+def update_repo(name: str, ref: Optional[str] = None,
+                restart: bool = True, reinstall: bool = True) -> dict:
+    """Pull or check out a specific ref, reinstall, optionally restart services.
+
+    Args:
+        name: One of `list_managed_repos()`.
+        ref:  Optional git ref — a tag (e.g. `v0.4.1`), branch, or commit SHA.
+              If omitted, fast-forwards the current branch from `origin`.
+        restart: Restart related launchd services after install (default True).
+        reinstall: Re-run `pip install -e` (default True).
 
     Notes:
       - Refuses to pull a dirty tree (uncommitted changes); fix manually first.
-      - When restarting `home.lighting.mcp_programmer` (the service hosting this very
-        tool), the kickstart is delayed 2 seconds so the response can return before
-        the worker is killed; the service will respawn from KeepAlive.
+      - For a `ref` that's a tag/commit, the working tree ends in detached HEAD
+        — that's fine for deployment; call `update_repo(name)` again later to
+        return to the tip of the tracking branch.
+      - When restarting `home.lighting.mcp_programmer` (this very service), the
+        kickstart is delayed 2 s so the response can return before the worker
+        dies; KeepAlive respawns it.
     """
     cfg = _repo_config(name)
     if cfg is None:
@@ -453,10 +494,24 @@ def update_repo(name: str, restart: bool = True, reinstall: bool = True) -> dict
 
     fetch = _git(["fetch", "--tags", "origin"], cfg["path"], timeout=120)
     steps.append({"step": "git fetch", **fetch})
-    pull  = _git(["pull", "--ff-only", "origin", "HEAD"], cfg["path"], timeout=120)
-    steps.append({"step": "git pull --ff-only", **pull})
-    if pull["rc"] != 0:
-        return {"ok": False, "error": "git pull failed", "steps": steps}
+    if fetch["rc"] != 0:
+        return {"ok": False, "error": "git fetch failed", "steps": steps}
+
+    if ref:
+        # Verify ref exists, then check out (detached for tags/SHAs is fine).
+        verify = _git(["rev-parse", "--verify", f"{ref}^{{commit}}"], cfg["path"])
+        steps.append({"step": "rev-parse ref", **verify})
+        if verify["rc"] != 0:
+            return {"ok": False, "error": f"ref '{ref}' not found", "steps": steps}
+        co = _git(["checkout", "--detach", ref], cfg["path"])
+        steps.append({"step": f"git checkout {ref}", **co})
+        if co["rc"] != 0:
+            return {"ok": False, "error": "checkout failed", "steps": steps}
+    else:
+        pull = _git(["pull", "--ff-only", "origin", "HEAD"], cfg["path"], timeout=120)
+        steps.append({"step": "git pull --ff-only", **pull})
+        if pull["rc"] != 0:
+            return {"ok": False, "error": "git pull failed", "steps": steps}
 
     if reinstall:
         target = cfg["path"] + cfg["extra"]
@@ -492,7 +547,10 @@ def update_repo(name: str, restart: bool = True, reinstall: bool = True) -> dict
                 steps.append({"step": f"restart {label}", "rc": rc.returncode,
                               "stdout": rc.stdout.strip(), "stderr": rc.stderr.strip()})
 
-    return {"ok": True, "name": name, "head": _git(['log', '-1', '--oneline'], cfg["path"])['stdout'],
+    return {"ok": True, "name": name,
+            "head": _git(['log', '-1', '--oneline'], cfg["path"])['stdout'],
+            "describe": _git(['describe', '--tags', '--always'], cfg["path"])['stdout'],
+            "installed_version": _pip_version(cfg["pip"], cfg.get("package", "")),
             "steps": steps}
 
 
