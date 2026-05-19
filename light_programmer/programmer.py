@@ -11,11 +11,7 @@ from datetime import datetime, timedelta
 from .matter_lib import (
     MatterController,
     SensorDevice,
-    ClimateSensorDevice,
     LightDevice,
-    ACDevice,
-    parse_ac_mode,
-    AC_MODE_OFF,
 )
 from . import mode_state, mode_http
 
@@ -177,94 +173,6 @@ def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bo
     return False
 
 
-def _client_read_climate(climate_devices: dict, sensor_id: str, client) -> dict:
-    """Read /api/climate?id=... — accepts standalone climate sensors AND
-    thermostats (which expose only `temperature`). Uses a registered
-    ClimateSensorDevice when available; otherwise hits the API directly via
-    the controller's HTTP client."""
-    dev = climate_devices.get(sensor_id)
-    if dev is not None:
-        return dev.read_climate() or {}
-    return client.get("/api/climate", {"id": sensor_id}) or {}
-
-
-# --- Climate / time-window helpers ---
-
-def _within_window(window: dict, now: datetime) -> bool:
-    if not window:
-        return True
-    start_mins = time_to_minutes(window.get("start", "00:00"))
-    end_mins = time_to_minutes(window.get("end", "23:59"))
-    cur = now.hour * 60 + now.minute
-    if start_mins <= end_mins:
-        return start_mins <= cur < end_mins
-    return cur >= start_mins or cur < end_mins
-
-
-def _dim_decide(reading, on_thr, off_thr, kind, prev_on):
-    """Per-dimension hysteresis decision. kind = 'rising' (cool/humid) or 'falling' (heat).
-
-    Returns True (on), False (off), or None (dimension not configured / no reading).
-    Inside the dead band, the dimension carries `prev_on` so it can keep the AC running
-    when another dimension has already dropped past its off threshold.
-    """
-    if reading is None or on_thr is None:
-        return None
-    if off_thr is None:
-        off_thr = on_thr
-    if kind == "rising":
-        if reading >= on_thr:
-            return True
-        if reading <= off_thr:
-            return False
-    else:  # falling
-        if reading <= on_thr:
-            return True
-        if reading >= off_thr:
-            return False
-    return prev_on
-
-
-def decide_ac_on(config: dict, temps: list, humids: list, prev_on: bool) -> bool:
-    """Combined temperature + humidity hysteresis across multiple climate sensors.
-
-    Per-dimension aggregation:
-      - cooling (cool/dry/fan/auto) and humidity use MAX across sensors (any sensor
-        reporting high triggers on).
-      - heating uses MIN (any sensor reporting cold triggers on).
-    Per-dimension decision uses its own thresholds with hysteresis. The combined
-    state is the logical OR: AC is on if any dimension says on, off only when
-    every configured dimension says off, and holds prev otherwise.
-    """
-    mode = (config.get("mode") or "cool").lower()
-
-    if mode == "heat":
-        temp_kind = "falling"
-        on_thr = config.get("on_below")
-        off_thr = config.get("off_above")
-        temp_reading = min([t for t in temps if t is not None], default=None)
-    else:
-        temp_kind = "rising"
-        on_thr = config.get("on_above")
-        off_thr = config.get("off_below")
-        temp_reading = max([t for t in temps if t is not None], default=None)
-
-    temp_decision = _dim_decide(temp_reading, on_thr, off_thr, temp_kind, prev_on)
-
-    humid_reading = max([h for h in humids if h is not None], default=None)
-    humid_decision = _dim_decide(humid_reading,
-                                 config.get("humidity_above"),
-                                 config.get("humidity_below"),
-                                 "rising", prev_on)
-
-    decisions = [d for d in (temp_decision, humid_decision) if d is not None]
-    if any(decisions):
-        return True
-    if decisions:  # has at least one definitive False, none True
-        return False
-    return prev_on
-
-
 # --- Main Loop ---
 
 def _apply_light(config, device, now, current_minutes, state_cache):
@@ -320,171 +228,17 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     state_cache[config['id']] = prev
 
 
-def _apply_ac(config, device, now, climate_devices, state_cache):
-    sensor_cond = config.get('sensor_condition')
-    legacy_sensors = config.get('sensor', [])
-    if sensor_cond:
-        is_occupied = evaluate_condition(sensor_cond, sensor_registry, now)
-    elif legacy_sensors:
-        is_occupied = any(
-            evaluate_condition({"type": "sensor", **s}, sensor_registry, now)
-            for s in legacy_sensors
-        )
-    else:
-        is_occupied = True
-
-    in_window = _within_window(config.get('active_window'), now)
-
-    # Climate sensors: accept `climate_sensors` (list) or `climate_sensor` (single).
-    # Default to the AC's own thermostat if neither is given (uses local_temperature).
-    raw_ids = config.get('climate_sensors')
-    if not raw_ids:
-        single = config.get('climate_sensor')
-        raw_ids = [single] if single else [config['id']]
-
-    temps: list = []
-    humids: list = []
-    for sid in raw_ids:
-        try:
-            reading = _client_read_climate(climate_devices, sid, device.client) or {}
-        except Exception as e:
-            logging.warning(f"Climate read failed for {sid}: {e}")
-            continue
-        if (t := reading.get('temperature')) is not None:
-            temps.append(t)
-        if (h := reading.get('humidity')) is not None:
-            humids.append(h)
-
-    primary_temp = temps[0] if temps else None
-
-    if config['id'] not in state_cache:
-        # Seed from real device state so a programmer restart while the AC is
-        # already running can still drive it off when conditions say so.
-        try:
-            actual = device.read_state() or {}
-            seeded_on = bool(actual.get('on'))
-            seeded_mode = actual.get('system_mode') if seeded_on else AC_MODE_OFF
-            seeded_sp = actual.get('cooling_setpoint') if seeded_on else None
-            logging.info(
-                f"[{device.name}] AC initial state: on={seeded_on}, "
-                f"mode={seeded_mode}, setpoint={seeded_sp}"
-            )
-        except Exception as e:
-            logging.warning(f"[{device.name}] AC initial read failed: {e}")
-            seeded_on, seeded_mode, seeded_sp = False, None, None
-        state_cache[config['id']] = {
-            'on': seeded_on, 'mode': seeded_mode,
-            'setpoint': seeded_sp, 'occupied_since': None,
-        }
-    prev = state_cache[config['id']]
-
-    # Continuous-occupancy debounce: AC only turns on after motion has been satisfied
-    # for `on_delay_minutes` (default 5) without interruption.
-    on_delay = float(config.get('on_delay_minutes', 5))
-    if is_occupied:
-        if prev.get('occupied_since') is None:
-            prev['occupied_since'] = now
-        occupied_for = (now - prev['occupied_since']).total_seconds() / 60.0
-    else:
-        prev['occupied_since'] = None
-        occupied_for = 0.0
-    occupancy_ready = is_occupied and (prev['on'] or occupied_for >= on_delay)
-
-    climate_says_on = decide_ac_on(config, temps, humids, prev.get('on', False))
-    effective_on = climate_says_on and occupancy_ready and in_window
-
-    target_mode_name = (config.get('mode') or 'cool').lower()
-    target_mode = parse_ac_mode(target_mode_name)
-    target_setpoint = config.get('setpoint')
-    if target_setpoint is not None:
-        target_setpoint = float(target_setpoint)
-
-    if effective_on:
-        if not prev['on'] or prev['mode'] != target_mode:
-            temp_log = f" (temp={primary_temp:.1f}°C)" if primary_temp is not None else ""
-            sp_log = f", setpoint={target_setpoint:.1f}" if target_setpoint is not None else ""
-            logging.info(f"[{device.name}] AC ON mode={target_mode_name}{sp_log}{temp_log}")
-            device.set_state(on=True, mode=target_mode, setpoint=target_setpoint)
-            prev['on'] = True
-            prev['mode'] = target_mode
-            prev['setpoint'] = target_setpoint
-        elif (target_setpoint is not None and
-              (prev['setpoint'] is None or abs(prev['setpoint'] - target_setpoint) >= 0.5)):
-            logging.info(f"[{device.name}] AC setpoint -> {target_setpoint:.1f}")
-            device.set_setpoint(target_setpoint)
-            prev['setpoint'] = target_setpoint
-    else:
-        if prev['on']:
-            temp_log = f" (temp={primary_temp:.1f}°C)" if primary_temp is not None else ""
-            reason = ("climate" if not climate_says_on
-                      else "occupancy" if not is_occupied
-                      else "warmup" if not occupancy_ready
-                      else "window")
-            logging.info(f"[{device.name}] AC OFF [{reason}]{temp_log}")
-            device.turn_off()
-            prev['on'] = False
-            prev['mode'] = AC_MODE_OFF
-            prev['setpoint'] = None
-
-    state_cache[config['id']] = prev
-
-
-_kill_off_counter = 0
-
-
-def _force_ac_off(dev: ACDevice, cfg: dict) -> None:
-    """Force AC off in a way that guarantees an IR packet is emitted.
-
-    The Aqara IR bridge (and similar Matter→IR gateways) dedup writes when the
-    target attribute equals the cached value, so plain `set_state(on=False)`
-    after a previous off is silently dropped — no IR. Every AC IR command from
-    the gateway is a complete state packet (mode + setpoint + fan), so nudging
-    the setpoint by ±0.5°C against the configured base forces the gateway to
-    emit a fresh packet whose `system_mode=0` actually reaches the unit.
-    Matter-reported state is not trusted here on purpose.
-    """
-    global _kill_off_counter
-    _kill_off_counter += 1
-    base = float(cfg.get('setpoint', 27.0))
-    nudge = 0.5 if (_kill_off_counter % 2) else -0.5
-    setpoint = round(base + nudge, 1)
-    dev.set_state(on=False, setpoint=setpoint)
-    logging.info(f"[{dev.name}] kill OFF (setpoint nudged to {setpoint}°C to force IR)")
-
-
 def _force_off_all(configs, device_map):
-    """Used when entering kill mode — turn everything off once."""
+    """Used when entering kill mode — turn every configured device off once."""
     for cfg in configs:
         dev = device_map.get(cfg['id'])
         if dev is None:
             continue
         try:
-            if (cfg.get('type') or '').lower() == 'ac' and isinstance(dev, ACDevice):
-                _force_ac_off(dev, cfg)
-            else:
-                dev.turn_off()
-                logging.info(f"[{getattr(dev, 'name', cfg['id'])}] KILL → OFF")
+            dev.turn_off()
+            logging.info(f"[{getattr(dev, 'name', cfg['id'])}] KILL → OFF")
         except Exception as e:
             logging.warning(f"KILL turn_off failed for {cfg['id']}: {e}")
-
-
-def _reassert_acs_off(configs, device_map):
-    """Re-issue OFF to every AC entry hourly while kill is engaged. ACs are
-    the only category we re-poke because lights aren't reachable from IR
-    remotes or other HomeKit clients in the way ACs are."""
-    for cfg in configs:
-        if (cfg.get('type') or '').lower() != 'ac':
-            continue
-        dev = device_map.get(cfg['id'])
-        if not isinstance(dev, ACDevice):
-            continue
-        try:
-            _force_ac_off(dev, cfg)
-        except Exception as e:
-            logging.warning(f"KILL re-assert failed for {cfg['id']}: {e}")
-
-
-KILL_AC_REASSERT_INTERVAL = timedelta(hours=1)
 
 
 def run_automation(server: str, config_path: str, api_key: str = None,
@@ -501,8 +255,6 @@ def run_automation(server: str, config_path: str, api_key: str = None,
         configs = json.load(f)
 
     device_map = {dev.id: dev for dev in controller.devices.values()}
-    climate_devices = {dev.id: dev for dev in controller.devices.values()
-                       if isinstance(dev, ClimateSensorDevice)}
 
     for dev in controller.devices.values():
         if isinstance(dev, SensorDevice):
@@ -519,7 +271,6 @@ def run_automation(server: str, config_path: str, api_key: str = None,
 
     prev_kill = False
     prev_auto = True
-    kill_ac_next_reassert = None
     logging.info("System initialized. Entering main loop.")
 
     try:
@@ -536,22 +287,15 @@ def run_automation(server: str, config_path: str, api_key: str = None,
                 logging.warning("KILL switch engaged — turning all devices off")
                 _force_off_all(configs, device_map)
                 state_cache.clear()
-                kill_ac_next_reassert = now + KILL_AC_REASSERT_INTERVAL
             elif not auto and prev_auto:
                 logging.info("Auto Mode disabled — schedule paused (devices left as-is)")
             elif (prev_kill and not kill) or (not prev_auto and auto):
                 logging.info("Resuming automation — clearing state cache for fresh apply")
                 state_cache.clear()
-                kill_ac_next_reassert = None
 
             prev_kill, prev_auto = kill, auto
 
-            if kill:
-                if kill_ac_next_reassert and now >= kill_ac_next_reassert:
-                    _reassert_acs_off(configs, device_map)
-                    kill_ac_next_reassert = now + KILL_AC_REASSERT_INTERVAL
-                continue
-            if not auto:
+            if kill or not auto:
                 continue
 
             current_minutes = now.hour * 60 + now.minute
@@ -562,12 +306,7 @@ def run_automation(server: str, config_path: str, api_key: str = None,
                 if device is None:
                     continue
 
-                cfg_type = (config.get('type') or '').lower()
-                is_ac = cfg_type == 'ac' or isinstance(device, ACDevice)
-
-                if is_ac and isinstance(device, ACDevice):
-                    _apply_ac(config, device, now, climate_devices, state_cache)
-                elif isinstance(device, LightDevice):
+                if isinstance(device, LightDevice):
                     _apply_light(config, device, now, current_minutes, state_cache)
 
     except KeyboardInterrupt:
@@ -575,7 +314,7 @@ def run_automation(server: str, config_path: str, api_key: str = None,
         sys.exit(0)
 
 def main():
-    parser = argparse.ArgumentParser(description="Matter Lighting & AC Automation")
+    parser = argparse.ArgumentParser(description="Matter Lighting Automation")
     parser.add_argument("--server", required=True, help="Server IP:PORT")
     parser.add_argument("--config", required=True, help="Path to config JSON")
     parser.add_argument("--api-key", default=os.environ.get("MATTER_SRV_KEY"),

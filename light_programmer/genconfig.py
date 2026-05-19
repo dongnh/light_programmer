@@ -25,8 +25,6 @@ def generate_lighting_config(ip_address, port, output_filename, api_key=None):
     classified = [(d, _classify(d)) for d in devices]
     light_nodes = [d for d, k in classified if k == "light"]
     sensor_nodes = [d for d, k in classified if k == "sensor"]
-    climate_nodes = [d for d, k in classified if k == "climate"]
-    ac_nodes = [d for d, k in classified if k == "ac"]
 
     mapped_sensors = [
         {"id": s.get("id"), "name": s.get("name") or s.get("id"), "timeout": 5}
@@ -59,25 +57,6 @@ def generate_lighting_config(ip_address, port, output_filename, api_key=None):
             "schedule": schedule,
             "sensor": mapped_sensors,
         })
-
-    primary_climate_id = climate_nodes[0].get("id") if climate_nodes else None
-    for ac in ac_nodes:
-        ac_id = ac.get("id")
-        display_name = ac.get("name") or ac_id
-        ac_entry = {
-            "id": ac_id,
-            "type": "ac",
-            "note": f"Auto-generated AC entry for {display_name}",
-            "climate_sensor": primary_climate_id,
-            "mode": "cool",
-            "setpoint": 26.0,
-            "on_above": 29.0,
-            "off_below": 26.5,
-            "on_delay_minutes": 5,
-            "sensor": mapped_sensors,
-            "active_window": {"start": "08:00", "end": "23:00"},
-        }
-        system_configurations.append(ac_entry)
 
     raw_json = json.dumps(system_configurations, indent=2)
 

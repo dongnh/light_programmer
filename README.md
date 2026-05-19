@@ -1,84 +1,83 @@
-# Home Lighting Programmer
+# Light Programmer
 
-Ecosystem-agnostic smart home automation using the Matter protocol. Replaces physical switches with sensor-driven control of **lights** (circadian-aware brightness + color temperature schedules) and **air conditioners** (temperature-driven hysteresis with occupancy gating).
+Sensor-driven home lighting over Matter. One small daemon reads your motion and presence sensors, follows a schedule you write once, and sends only the commands that actually change something.
 
-> **Note:** For domestic use only. Not hardened for production/commercial deployment.
+> For home use. Not hardened for commercial deployment.
 
-## How It Works
+## What it does
 
-The system runs a 1Hz loop that:
-1. Reads real-time sensor data (motion/presence) via Server-Sent Events
-2. Interpolates the configured schedule to determine target brightness and color temperature
-3. Sends commands only when the target state changes
+Light Programmer replaces wall switches with intent. You describe how each light should behave across the day — brightness, color temperature, which sensors matter — and the daemon keeps the room matching that description.
 
-Three lighting modes are supported:
-- **Decoration** - Static color and intensity
-- **Utility** - Sensor-triggered, low-latency response
-- **Ambient** - Time-based color temperature and brightness that follows natural daylight
+- **Circadian schedules.** Brightness and color temperature interpolate smoothly between the points you set.
+- **Presence-aware.** Lights respond to motion and presence sensors, with per-sensor timeouts and boolean conditions when you need them.
+- **Quiet on the wire.** Commands are sent only when the target differs from the current state, so the Matter fabric stays calm.
+- **Mode flags.** An `auto` switch pauses the schedule; a `kill` switch turns everything off. Both are toggleable over HTTP for HomeKit integration.
+
+Air-conditioning and climate logic now live in [matter\_webcontrol](https://github.com/dongnh/matter_webcontrol) and the HomeKit bridges. Light Programmer focuses on lights.
 
 ## Requirements
 
-- Python 3
-- A running [`matter-web-controller`](https://github.com/dongnh/matter_webcontrol) instance
-- Matter-compatible lights and sensors
+- Python 3.8 or later
+- A reachable [matter\_webcontrol](https://github.com/dongnh/matter_webcontrol) instance
+- Matter-compatible lights and occupancy sensors
 
-## Installation
+## Install
 
 ```bash
 pip install light-programmer
 ```
 
-## Quick Start
+## Get started
 
 ```bash
-# Step 1: Auto-generate config from your hardware
+# 1. Generate a starter config from your hardware.
 light-genconfig --ip 192.168.1.220 --port 8080 --out config.json
 
-# Step 2: Edit config.json to customize schedules and sensor logic
+# 2. Edit config.json to match how you want each room to behave.
 
-# Step 3: Run
+# 3. Run.
 light-programmer --server 192.168.1.220:8080 --config config.json
 ```
 
+Set `MATTER_SRV_KEY` in the environment, or pass `--api-key`, if your matter\_webcontrol requires authentication.
+
 ## Configuration
 
-Each device entry in the config JSON has:
+A configuration is a JSON array. Each entry describes one light.
 
 ```jsonc
 {
-    "id": "dev_kitchen_sink",       // Matter node ID
-    "note": "Sink area light",      // Human-readable description
-    "schedule": [                   // Time-based control points
+    "id": "dev_kitchen_sink",
+    "note": "Sink area",
+    "schedule": [
         { "time": "06:30", "level": 50,  "kelvin": 4000 },
         { "time": "12:00", "level": 100, "kelvin": 4000 },
         { "time": "21:30", "level": 100, "kelvin": 2700 }
     ],
-    "sensor": [                     // Simple sensor trigger
+    "sensor": [
         { "id": "kitchen_motion", "timeout": 5 }
     ]
 }
 ```
 
-- `level`: Brightness 0-100%
-- `kelvin`: Color temperature 2700-6500K (omit for non-color lights)
-- `timeout`: Seconds to keep light on after sensor clears
-- Values between schedule points are linearly interpolated
+- `level` is brightness, 0 to 100.
+- `kelvin` is color temperature. Omit it for fixed-white lights.
+- `timeout` is how many minutes to hold the light on after the sensor clears.
+- Values between schedule points are linearly interpolated. Schedules wrap across midnight.
 
-See [`sample.json`](sample.json) for a full working example.
+See [`sample.json`](sample.json) for a complete example.
 
-## Advanced Sensor Logic
+## Sensor logic
 
-For complex scenarios, use `sensor_condition` instead of `sensor`. It supports a tree of boolean operators:
+The simple `sensor` array is enough for most rooms: any listed sensor being active enables the light. For everything else, use `sensor_condition` — a small expression tree.
 
-| Node Type     | Description |
-|---------------|-------------|
-| `sensor`      | `true` if occupied or within timeout |
-| `time_window` | `true` if current time is between `start` and `end` (cross-midnight supported) |
-| `AND`         | All operands must be `true` |
-| `OR`          | At least one operand must be `true` |
-| `NOT`         | Inverts its operand |
+| Node | Meaning |
+|---|---|
+| `sensor` | True while occupied, or within the configured `timeout` after clearing. |
+| `time_window` | True when the current time falls between `start` and `end`. Cross-midnight is supported. |
+| `AND`, `OR`, `NOT` | Boolean operators over child nodes. |
 
-### Example: Light on only when at desk AND not in bed
+### At the desk, but not in bed
 
 ```json
 {
@@ -97,7 +96,7 @@ For complex scenarios, use `sensor_condition` instead of `sensor`. It supports a
 }
 ```
 
-### Example: Follow schedule during day, sensor-only at night
+### Schedule during the day, motion at night
 
 ```json
 {
@@ -111,47 +110,35 @@ For complex scenarios, use `sensor_condition` instead of `sensor`. It supports a
 }
 ```
 
-During 06:00-22:00 the light follows its schedule regardless of sensors. Outside that window, it only turns on when the sensor detects motion.
+During the window, the light follows the schedule. Outside it, only motion brings it on.
 
-## Air Conditioner Control
+## Mode flags
 
-AC entries are climate-driven (no time schedule). They use a Matter thermostat (`/api/ac`) and read ambient state via `/api/climate` — either from one or more standalone climate sensors, or directly from the AC's own thermostat (`local_temperature`) when no sensor is configured.
+Two booleans control the daemon at runtime, stored together in a small JSON file passed via `--mode-state`:
 
-```jsonc
-{
-    "id": "dev_ac_livingroom",
-    "type": "ac",                          // marks this entry as an AC
-    "climate_sensor": "dev_temp_livingroom",
-    "mode": "cool",                        // cool / heat / dry / fan / auto
-    "setpoint": 26.0,                      // °C sent to the thermostat
-    "on_above": 29.0,                      // turn on when ambient ≥ 29 °C
-    "off_below": 26.5,                     // turn off when ambient ≤ 26.5 °C
-    "on_delay_minutes": 5,                 // require continuous occupancy ≥ 5 min before turning on
-    "active_window": {"start": "10:00", "end": "23:30"},
-    "sensor": [
-        {"id": "dev_occ_livingroom", "timeout": 15}
-    ]
-}
+- `auto` — when `false`, the schedule is paused and devices are left as they are.
+- `kill` — when `true`, every configured device is turned off, then the loop stays paused until `kill` is cleared.
+
+When `--mode-state` is set, an HTTP endpoint is exposed on `--mode-http-host:--mode-http-port` (default `127.0.0.1:7870`):
+
+```
+GET  /mode                 → { "auto": true, "kill": false }
+POST /mode  { "auto": false }
+POST /kill  { "kill": true }
 ```
 
-**Bring-up rule** (off → on): climate trigger **AND** occupancy continuously satisfied for `on_delay_minutes` **AND** time within `active_window`.
+This is the same surface the HomeKit bridge uses to expose Auto and Kill as Apple Home switches.
 
-**Bring-down rule** (on → off): climate trigger no longer met, **OR** occupancy fails (after each sensor's `timeout` hold), **OR** outside `active_window`.
+## MCP server
 
-The climate trigger is the OR of two independent hysteresis loops — temperature (`on_above` / `off_below`) and humidity (`humidity_above` / `humidity_below`). The AC turns on when either dimension says on, and off only when every configured dimension says off. In the dead band of every dimension, it holds the previous state. Use `climate_sensors` (list) to aggregate readings across multiple sensors with any-trigger semantics (max temp / max humidity). For `mode: "heat"`, use `on_below` / `off_above` instead.
-
-The same `sensor` / `sensor_condition` AST used by lights applies — combine multiple occupancy sensors with `AND`/`OR`/`NOT` as needed. If a climate reading is unavailable, that dimension holds its last decision rather than flapping.
-
-## MCP Server (AI Agent Configuration)
-
-An MCP server is bundled so AI agents (Claude Desktop, Claude Code, etc.) can discover devices and edit the config for you.
+A bundled MCP server lets Claude and other agents discover your devices and edit the configuration directly.
 
 ```bash
-pip install light-programmer[mcp]
-light-programmer-mcp                  # stdio transport
+pip install "light-programmer[mcp]"
+light-programmer-mcp
 ```
 
-Example Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Example entry for `claude_desktop_config.json`:
 
 ```json
 {
@@ -164,29 +151,29 @@ Example Claude Desktop config (`~/Library/Application Support/Claude/claude_desk
 }
 ```
 
-Tools exposed:
+Available tools:
 
 | Tool | Purpose |
-|------|---------|
-| `list_devices` | Discover lights / sensors / climate / AC from `/api/metadata` |
-| `read_climate`, `read_ac_state`, `read_status` | Live readings |
-| `read_config`, `write_config`, `validate_config` | Whole-file CRUD with schema validation |
-| `upsert_entry`, `remove_entry` | Per-entry edits keyed by device id |
-| `set_light`, `set_ac` | Direct device control for quick tests |
-| `config_schema` (prompt) | Schema reference an agent can pull when authoring entries |
+|---|---|
+| `list_devices` | Enumerate lights, sensors, climate, and AC from `/api/metadata`. |
+| `read_climate`, `read_ac_state`, `read_status` | Live readings from matter\_webcontrol. |
+| `read_config`, `write_config`, `validate_config` | Whole-file edits with schema validation. |
+| `upsert_entry`, `remove_entry` | Per-entry edits keyed by device id. |
+| `set_light`, `set_ac` | Direct control for quick tests. |
+| `get_mode`, `set_mode` | Read and write the auto/kill flags. |
 
-Validation rejects writes with bad time formats, out-of-range levels/Kelvin, missing thresholds, or hysteresis bands where `off_below ≥ on_above` (cool) / `off_above ≤ on_below` (heat).
+The climate and AC tools are proxies to matter\_webcontrol. Light Programmer itself does not automate AC.
 
-## Project Structure
+## Project layout
 
 | File | Purpose |
-|------|---------|
-| `light_programmer/programmer.py` | Main automation controller — runs the 1Hz loop for lights and ACs |
-| `light_programmer/matter_lib.py` | Device abstractions: `LightDevice`, `SensorDevice`, `ClimateSensorDevice`, `ACDevice` |
-| `light_programmer/genconfig.py` | Generates config JSON from hardware discovery |
-| `light_programmer/mcp_server.py` | MCP server exposing discovery + config CRUD tools to AI agents |
-| `sample.json` | Example configuration with 11 devices |
-| `pyproject.toml` | Package configuration and CLI entry points |
+|---|---|
+| `light_programmer/programmer.py` | The 1 Hz automation loop. |
+| `light_programmer/matter_lib.py` | Device wrappers and the matter\_webcontrol HTTP client. |
+| `light_programmer/genconfig.py` | Generates a starter configuration from `/api/metadata`. |
+| `light_programmer/mode_state.py`, `mode_http.py` | Auto/kill flags and the small HTTP API. |
+| `light_programmer/mcp_server.py` | MCP tools for agent-driven configuration. |
+| `sample.json` | A working multi-room example. |
 
 ## License
 
