@@ -297,7 +297,7 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     target_level = int(target_state.get('level', 0)) if is_occupied else 0
     target_on = target_level > 0
 
-    prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1, 'rain': None})
+    prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1, 'rain': False})
     rain_tag = (intensity or "on") if raining else False
     if prev.get('rain') != rain_tag:
         logging.info("[" + device.name + "] RAIN " + (str(rain_tag) if raining else "off"))
