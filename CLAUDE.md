@@ -50,11 +50,13 @@ sample.json                    # Real-world config example with 11 devices
   AND the light is on, overlay rain-time values onto the scheduled state. Does not turn the
   light on/off — only recolors/dims an already-on device (e.g. an artificial skylight going
   overcast). Shape: `"rain": {sensor|sensor_condition, kelvin?, level?|level_scale?}`.
-  - `kelvin`: absolute color temp while raining. `level`: absolute brightness (0-100);
-    or `level_scale`: multiply the scheduled brightness (e.g. `0.5`). With no sensor it never
-    triggers. The rain sensor (from `matter-weather-sensor`) uses the dedicated `rain_state:
-    "rain"` key (Matter Rain Sensor 0x0044); the SSE callback reads either a `rain` or
-    `occupancy` key, so a rain sensor is registered/gated like any presence sensor.
+  - Brightness precedence: `intensity_level` (map rain intensity → absolute brightness, e.g.
+    `{"light":60,"moderate":45,"heavy":30,"violent":15}`) → `level` (single absolute) →
+    `level_scale` (multiply scheduled). Color temp: `intensity_kelvin` map → `kelvin`.
+    With no sensor it never triggers. The rain sensor (from `matter-weather-sensor`) uses the
+    dedicated `rain_state: "rain"` key (Matter Rain Sensor 0x0044) and streams `rain_intensity`
+    in its SSE; the callback reads `rain`/`occupancy` (binary) and stores the latest intensity,
+    so the override dims an artificial skylight in step with how hard it's raining.
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
 - **State caching**: Only sends commands when target differs from cached state (brightness ±2,
   color temp >50K threshold).

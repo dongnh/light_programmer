@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import threading
@@ -114,6 +116,13 @@ def create_sensor_callback(sensor_id: str):
             current_state = sensor_registry.get(sensor_id, {"is_occupied": False, "last_cleared": datetime.min})
             state_mutated = False
 
+            # Remember the latest real rain intensity (light/moderate/heavy/violent)
+            # so a rain override can scale brightness by it. Skip "none"/null so the
+            # last real value is retained through a brief lull within the timeout.
+            intensity = payload.get("rain_intensity")
+            if intensity and intensity != "none":
+                current_state["rain_intensity"] = intensity
+
             if occupancy == 1 and not current_state["is_occupied"]:
                 current_state["is_occupied"] = True
                 state_mutated = True
@@ -199,18 +208,56 @@ def _rain_active(rain_cfg: dict, now: datetime) -> bool:
     return False
 
 
-def _apply_rain_override(target_state: dict, rain_cfg: dict) -> None:
+_INTENSITY_RANK = {"light": 1, "moderate": 2, "heavy": 3, "violent": 4}
+
+
+def _collect_sensor_ids(node: dict, out: set) -> None:
+    if not node:
+        return
+    if node.get('type') == 'sensor' and node.get('id'):
+        out.add(node['id'])
+    for child in node.get('operands', []):
+        _collect_sensor_ids(child, out)
+
+
+def _rain_intensity(rain_cfg: dict) -> str | None:
+    """Heaviest current rain intensity across the override's referenced sensors.
+
+    Reads the `rain_intensity` each rain sensor last streamed (light/moderate/
+    heavy/violent), returning the strongest, or None if none reported one.
+    """
+    ids = {s['id'] for s in rain_cfg.get('sensor', []) if s.get('id')}
+    _collect_sensor_ids(rain_cfg.get('sensor_condition'), ids)
+    best, best_rank = None, 0
+    for sid in ids:
+        inten = sensor_registry.get(sid, {}).get('rain_intensity')
+        rank = _INTENSITY_RANK.get(inten, 0)
+        if rank > best_rank:
+            best, best_rank = inten, rank
+    return best
+
+
+def _apply_rain_override(target_state: dict, rain_cfg: dict, intensity: str | None) -> None:
     """Overlay rain-time color temperature / brightness onto the scheduled state.
 
-    - `kelvin`      : absolute color temperature to use while raining.
-    - `level`       : absolute brightness (0-100) while raining; OR
-    - `level_scale` : multiply the scheduled brightness (e.g. 0.5 = half) when no
-                      absolute `level` is given.
-    Lets an artificial skylight go dim/overcast when it's actually raining outside.
+    Brightness, in precedence order:
+    - `intensity_level` : map rain intensity -> absolute brightness, e.g.
+                          {"light": 60, "moderate": 45, "heavy": 30, "violent": 15};
+    - `level`           : a single absolute brightness (0-100); OR
+    - `level_scale`     : multiply the scheduled brightness (e.g. 0.5 = half).
+    Color temperature: `intensity_kelvin` map (per intensity), else `kelvin`.
+    Lets an artificial skylight dim in step with how hard it's actually raining.
     """
-    if 'kelvin' in rain_cfg:
+    ik = rain_cfg.get('intensity_kelvin')
+    if ik and intensity in ik:
+        target_state['kelvin'] = ik[intensity]
+    elif 'kelvin' in rain_cfg:
         target_state['kelvin'] = rain_cfg['kelvin']
-    if 'level' in rain_cfg:
+
+    il = rain_cfg.get('intensity_level')
+    if il and intensity in il:
+        target_state['level'] = il[intensity]
+    elif 'level' in rain_cfg:
         target_state['level'] = rain_cfg['level']
     elif 'level_scale' in rain_cfg:
         target_state['level'] = target_state.get('level', 0) * float(rain_cfg['level_scale'])
@@ -237,16 +284,18 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     # (already-on) device — e.g. an artificial skylight going overcast.
     rain_cfg = config.get('rain')
     raining = bool(rain_cfg) and is_occupied and _rain_active(rain_cfg, now)
+    intensity = _rain_intensity(rain_cfg) if raining else None
     if raining:
-        _apply_rain_override(target_state, rain_cfg)
+        _apply_rain_override(target_state, rain_cfg, intensity)
 
     target_level = int(target_state.get('level', 0)) if is_occupied else 0
     target_on = target_level > 0
 
     prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1, 'rain': None})
-    if prev.get('rain') != raining:
-        logging.info("[" + device.name + "] RAIN " + ("ON" if raining else "off"))
-        prev['rain'] = raining
+    rain_tag = (intensity or "on") if raining else False
+    if prev.get('rain') != rain_tag:
+        logging.info("[" + device.name + "] RAIN " + (str(rain_tag) if raining else "off"))
+        prev['rain'] = rain_tag
 
     if target_on:
         matter_level = int((target_level / 100.0) * 254)
