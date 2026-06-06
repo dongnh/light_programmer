@@ -206,7 +206,7 @@ def _classify(dev_config: dict) -> str:
         # Pure climate sensors (no occupancy capability).
         if "occupancy" not in caps:
             return "climate"
-    if "sensor" in hw or "occupancy" in caps:
+    if "sensor" in hw or "occupancy" in caps or "rain" in caps or "rain" in states:
         return "sensor"
     if "light" in hw or "on_off" in caps or "brightness" in caps:
         return "light"

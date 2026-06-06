@@ -52,8 +52,9 @@ sample.json                    # Real-world config example with 11 devices
   overcast). Shape: `"rain": {sensor|sensor_condition, kelvin?, level?|level_scale?}`.
   - `kelvin`: absolute color temp while raining. `level`: absolute brightness (0-100);
     or `level_scale`: multiply the scheduled brightness (e.g. `0.5`). With no sensor it never
-    triggers. The rain sensor (from `matter-weather-sensor`) must use `rain_state: "occupancy"`
-    so it streams over matter_webcontrol's occupancy SSE like any presence sensor.
+    triggers. The rain sensor (from `matter-weather-sensor`) uses the dedicated `rain_state:
+    "rain"` key (Matter Rain Sensor 0x0044); the SSE callback reads either a `rain` or
+    `occupancy` key, so a rain sensor is registered/gated like any presence sensor.
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
 - **State caching**: Only sends commands when target differs from cached state (brightness ±2,
   color temp >50K threshold).

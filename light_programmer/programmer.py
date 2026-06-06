@@ -103,7 +103,12 @@ def create_sensor_callback(sensor_id: str):
         json_str = raw_data[5:].lstrip()
         try:
             payload = json.loads(json_str)
-            occupancy = payload.get("occupancy", 0)
+            # A dedicated rain sensor streams a `rain` key; presence sensors a
+            # `occupancy` key. Treat either as the binary active signal so the
+            # same registry/condition machinery works for both.
+            occupancy = payload.get("occupancy")
+            if occupancy is None:
+                occupancy = payload.get("rain", 0)
             logging.info("Sensor Stream [" + sensor_id + "]: " + str(payload))
 
             current_state = sensor_registry.get(sensor_id, {"is_occupied": False, "last_cleared": datetime.min})
