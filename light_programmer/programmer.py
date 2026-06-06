@@ -241,10 +241,13 @@ def _apply_rain_override(target_state: dict, rain_cfg: dict, intensity: str | No
     """Overlay rain-time color temperature / brightness onto the scheduled state.
 
     Brightness, in precedence order:
-    - `intensity_level` : map rain intensity -> absolute brightness, e.g.
-                          {"light": 60, "moderate": 45, "heavy": 30, "violent": 15};
+    - `intensity_scale` : multiply the SCHEDULED brightness by a per-intensity
+                          factor, e.g. {"light":0.85,"moderate":0.65,"heavy":0.45,
+                          "violent":0.25}. Blends rain with the circadian schedule
+                          so the skylight still tracks time-of-day, just dimmer.
+    - `intensity_level` : map rain intensity -> absolute brightness (ignores schedule);
     - `level`           : a single absolute brightness (0-100); OR
-    - `level_scale`     : multiply the scheduled brightness (e.g. 0.5 = half).
+    - `level_scale`     : multiply the scheduled brightness by a single factor.
     Color temperature: `intensity_kelvin` map (per intensity), else `kelvin`.
     Lets an artificial skylight dim in step with how hard it's actually raining.
     """
@@ -254,8 +257,11 @@ def _apply_rain_override(target_state: dict, rain_cfg: dict, intensity: str | No
     elif 'kelvin' in rain_cfg:
         target_state['kelvin'] = rain_cfg['kelvin']
 
+    isc = rain_cfg.get('intensity_scale')
     il = rain_cfg.get('intensity_level')
-    if il and intensity in il:
+    if isc and intensity in isc:
+        target_state['level'] = target_state.get('level', 0) * float(isc[intensity])
+    elif il and intensity in il:
         target_state['level'] = il[intensity]
     elif 'level' in rain_cfg:
         target_state['level'] = rain_cfg['level']

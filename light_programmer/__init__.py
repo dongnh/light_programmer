@@ -1,3 +1,3 @@
 """Home Lighting Programmer - Smart home lighting automation using Matter protocol."""
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
