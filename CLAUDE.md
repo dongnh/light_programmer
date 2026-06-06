@@ -46,6 +46,14 @@ sample.json                    # Real-world config example with 11 devices
 - **Sensor logic**: Two modes for light entries:
   - Simple: `"sensor": [{id, timeout}]` — any sensor active = device enabled.
   - Advanced: `"sensor_condition"` — AST with `AND`, `OR`, `NOT`, `sensor`, `time_window` nodes.
+- **Rain override** (optional `"rain"` block on a light entry): while a rain sensor is active
+  AND the light is on, overlay rain-time values onto the scheduled state. Does not turn the
+  light on/off — only recolors/dims an already-on device (e.g. an artificial skylight going
+  overcast). Shape: `"rain": {sensor|sensor_condition, kelvin?, level?|level_scale?}`.
+  - `kelvin`: absolute color temp while raining. `level`: absolute brightness (0-100);
+    or `level_scale`: multiply the scheduled brightness (e.g. `0.5`). With no sensor it never
+    triggers. The rain sensor (from `matter-weather-sensor`) must use `rain_state: "occupancy"`
+    so it streams over matter_webcontrol's occupancy SSE like any presence sensor.
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
 - **State caching**: Only sends commands when target differs from cached state (brightness ±2,
   color temp >50K threshold).

@@ -175,6 +175,42 @@ def evaluate_condition(node: dict, registry: dict, current_time: datetime) -> bo
 
 # --- Main Loop ---
 
+def _rain_active(rain_cfg: dict, now: datetime) -> bool:
+    """True if a light entry's optional `rain` override should apply right now.
+
+    Accepts the same sensor shapes as a light's gating: a `sensor_condition` AST
+    or a legacy `sensor` list (any active -> True). With no sensor configured the
+    override never triggers (returns False) — rain must be observed, not assumed.
+    """
+    cond = rain_cfg.get('sensor_condition')
+    if cond:
+        return evaluate_condition(cond, sensor_registry, now)
+    sensors = rain_cfg.get('sensor', [])
+    if sensors:
+        return any(
+            evaluate_condition({"type": "sensor", **s}, sensor_registry, now)
+            for s in sensors
+        )
+    return False
+
+
+def _apply_rain_override(target_state: dict, rain_cfg: dict) -> None:
+    """Overlay rain-time color temperature / brightness onto the scheduled state.
+
+    - `kelvin`      : absolute color temperature to use while raining.
+    - `level`       : absolute brightness (0-100) while raining; OR
+    - `level_scale` : multiply the scheduled brightness (e.g. 0.5 = half) when no
+                      absolute `level` is given.
+    Lets an artificial skylight go dim/overcast when it's actually raining outside.
+    """
+    if 'kelvin' in rain_cfg:
+        target_state['kelvin'] = rain_cfg['kelvin']
+    if 'level' in rain_cfg:
+        target_state['level'] = rain_cfg['level']
+    elif 'level_scale' in rain_cfg:
+        target_state['level'] = target_state.get('level', 0) * float(rain_cfg['level_scale'])
+
+
 def _apply_light(config, device, now, current_minutes, state_cache):
     schedule = config.get('schedule', [])
     target_state = calculate_current_state(schedule, current_minutes)
@@ -192,10 +228,20 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     else:
         is_occupied = True
 
+    # Optional rain override: while a rain sensor is active, recolor/dim the
+    # (already-on) device — e.g. an artificial skylight going overcast.
+    rain_cfg = config.get('rain')
+    raining = bool(rain_cfg) and is_occupied and _rain_active(rain_cfg, now)
+    if raining:
+        _apply_rain_override(target_state, rain_cfg)
+
     target_level = int(target_state.get('level', 0)) if is_occupied else 0
     target_on = target_level > 0
 
-    prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1})
+    prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1, 'rain': None})
+    if prev.get('rain') != raining:
+        logging.info("[" + device.name + "] RAIN " + ("ON" if raining else "off"))
+        prev['rain'] = raining
 
     if target_on:
         matter_level = int((target_level / 100.0) * 254)
