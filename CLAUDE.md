@@ -59,6 +59,16 @@ sample.json                    # Real-world config example with 11 devices
     dedicated `rain_state: "rain"` key (Matter Rain Sensor 0x0044) and streams `rain_intensity`
     in its SSE; the callback reads `rain`/`occupancy` (binary) and stores the latest intensity,
     so the override dims an artificial skylight in step with how hard it's raining.
+  - **Colour-flow effect (v0.12.0)**: a rain entry with `"effect": "flow"` offloads an
+    on-device flicker animation to the Yeelight bridge instead of the 1Hz static-level control.
+    While raining + on, the loop POSTs `/api/flow {id, base, peak, kelvin, lightning}` to the
+    Yeelight bridge (`--yeelight-server`); `base` = scheduled level × `intensity_scale`, `peak`
+    = full scheduled level, `lightning` true when `intensity` ∈ `flash_levels` (default
+    `["violent"]`). While flow is active the bulb is owned by the bridge — static level/temp
+    control is skipped and the state cache is poisoned (`level=-1`) so it re-applies on stop.
+    When rain clears / light turns off / effect is removed, the loop POSTs `/api/flow/stop`.
+    Flow is best-effort: bridge errors are logged and never block the loop. See
+    `_flow_post`/`_flow_changed` in [programmer.py](light_programmer/programmer.py:31).
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
 - **State caching**: Only sends commands when target differs from cached state (brightness ±2,
   color temp >50K threshold).
@@ -83,6 +93,14 @@ light-genconfig --ip <IP> --port <PORT> --out config.json [--api-key <KEY>]
 light-programmer --server <IP:PORT> --config config.json [--api-key <KEY>]
 ```
 
+`light-programmer` flags (see [programmer.py](light_programmer/programmer.py:489)):
+- `--server IP:PORT` (required), `--config PATH` (required), `--api-key` / `MATTER_SRV_KEY`.
+- `--mode-state PATH` / `LP_MODE_STATE` — enables the auto/kill flags + `/mode` HTTP endpoint.
+  Without it, mode flags and HomeKit-bridge integration are off.
+- `--mode-http-host` (default `127.0.0.1`; use `0.0.0.0` for LAN) / `--mode-http-port` (7870).
+- `--yeelight-server IP:PORT` / `LP_YEELIGHT_SERVER` and `--yeelight-api-key` / `LP_YEELIGHT_KEY`
+  — only needed when a config uses rain `"effect": "flow"`. Optional.
+
 ## Dependencies
 
 Pure Python 3 stdlib (no pip packages). Requires a running `matter_webcontrol` instance
@@ -95,3 +113,33 @@ Pure Python 3 stdlib (no pip packages). Requires a running `matter_webcontrol` i
 - Brightness: 0-100 in config (mapped to 0-254 Matter scale internally).
 - Color temperature: Kelvin in config (converted to mireds internally).
 - Logging via Python `logging` module at INFO level.
+
+## Development & Release
+
+- **Version source of truth**: [`light_programmer/__init__.py`](light_programmer/__init__.py)
+  (`__version__`). Bump it on every user-facing change. ⚠️ `pyproject.toml`'s `version`
+  currently lags (`0.7.0` while `__init__` is past `0.12.0`) — keep both in sync when releasing.
+- **Commit convention**: one commit per release, subject `vX.Y.Z: <imperative summary>` (e.g.
+  `v0.12.0: rain "effect: flow" drives Yeelight on-device colour-flow animation`). MINOR for
+  new behaviour, PATCH for fixes. Match the existing `git log` style.
+- **No automated test suite.** `tests_local/` holds ad-hoc scripts (`identify_sensors.py`) +
+  fixture data (`home.json`), not pytest. The `.venv-matter` / `.venv-test` / `.venv-yee`
+  dirs are scratch environments for poking the live controller — don't treat them as the
+  project venv and don't commit them (they're gitignored). Validate changes by reasoning +
+  running `light-programmer` against a real/local `matter_webcontrol`.
+- **Config has no formal schema**: `load_config`/`run_automation` parse JSON directly; a typo'd
+  key is silently ignored rather than rejected. Cross-check new config keys against the actual
+  reader in [programmer.py](light_programmer/programmer.py) before assuming they take effect.
+
+## Deployment & Ecosystem
+
+- **Production host**: runs as a launchd service on `panda@192.168.1.220` (key-based SSH set up).
+  See the auto-memory entries (`light_programmer_deployment`, `homekit_bridge_deployment`) for
+  venv path, launchd labels, and config location before touching the live install.
+- **Required runtime peer**: a live [`matter_webcontrol`](https://github.com/dongnh/matter_webcontrol)
+  instance. This package only talks to its REST/SSE API; it never speaks Matter directly.
+- **Surrounding stack** (separate repos, push to `github.com/dongnh`): `matter-weather-sensor`
+  (rain/illuminance sensors feeding the rain override), the Yeelight bridge (colour-flow target),
+  `homekit-bridge` (consumes `/mode` for LP Auto / LP Kill switches), and the
+  `matter-homekit-bridge` AC/heater stack. Light_programmer is the schedule brain; these are
+  its sensors and actuators.
