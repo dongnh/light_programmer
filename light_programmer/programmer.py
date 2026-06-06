@@ -8,6 +8,7 @@ import argparse
 import logging
 import sys
 import queue
+import urllib.request
 from datetime import datetime, timedelta
 
 from .matter_lib import (
@@ -26,6 +27,36 @@ logging.basicConfig(
 
 # Global sensor state and event trigger
 sensor_registry = {}
+
+# Optional Yeelight colour-flow endpoint (for rain "effect": "flow" lights).
+_flow_cfg = {"server": None, "api_key": None}
+
+
+def _flow_post(path: str, body: dict) -> None:
+    """POST a colour-flow command to the Yeelight bridge (best-effort)."""
+    server = _flow_cfg.get("server")
+    if not server:
+        return
+    data = json.dumps(body).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if _flow_cfg.get("api_key"):
+        headers["X-API-Key"] = _flow_cfg["api_key"]
+    req = urllib.request.Request("http://" + server + path, data=data,
+                                 headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=4) as r:
+            r.read()
+    except Exception as e:  # noqa: BLE001 - flow is best-effort, never block the loop
+        logging.warning("flow %s failed: %s", path, e)
+
+
+def _flow_changed(prev: dict, base: int, peak: int, kelvin: int, lightning: bool) -> bool:
+    """True if the flow needs (re)sending: not active, or params drifted enough."""
+    f = prev.get("flow")
+    if not prev.get("flow_active") or not f:
+        return True
+    return (abs(f["base"] - base) >= 3 or abs(f["peak"] - peak) >= 3
+            or f["kelvin"] != kelvin or f["lightning"] != lightning)
 state_changed_event = threading.Event()
 
 
@@ -289,6 +320,7 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     # Optional rain override: while a rain sensor is active, recolor/dim the
     # (already-on) device — e.g. an artificial skylight going overcast.
     rain_cfg = config.get('rain')
+    sched_level = int(target_state.get('level', 0))  # scheduled brightness before any rain override
     raining = bool(rain_cfg) and is_occupied and _rain_active(rain_cfg, now)
     intensity = _rain_intensity(rain_cfg) if raining else None
     if raining:
@@ -297,11 +329,39 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     target_level = int(target_state.get('level', 0)) if is_occupied else 0
     target_on = target_level > 0
 
-    prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1, 'rain': False})
+    prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1,
+                                          'rain': False, 'flow': None, 'flow_active': False})
     rain_tag = (intensity or "on") if raining else False
     if prev.get('rain') != rain_tag:
         logging.info("[" + device.name + "] RAIN " + (str(rain_tag) if raining else "off"))
         prev['rain'] = rain_tag
+
+    # Colour-flow effect (Yeelight on-device animation) — opt-in per rain entry.
+    # Brightness stays synced to the schedule: base = scheduled x intensity_scale
+    # (already in target_level), peak = the full scheduled level.
+    use_flow = (raining and target_on and (rain_cfg or {}).get('effect') == 'flow'
+                and _flow_cfg.get('server'))
+    if use_flow:
+        base, peak = target_level, sched_level
+        kelvin = int(rain_cfg.get('kelvin', 4500))
+        lightning = intensity in rain_cfg.get('flash_levels', ['violent'])
+        if _flow_changed(prev, base, peak, kelvin, lightning):
+            _flow_post('/api/flow', {'id': config['id'], 'base': base, 'peak': peak,
+                                     'kelvin': kelvin, 'lightning': lightning})
+            prev['flow'] = {'base': base, 'peak': peak, 'kelvin': kelvin, 'lightning': lightning}
+            prev['flow_active'] = True
+            prev['state'], prev['level'], prev['kelvin'] = 'ON', -1, -1  # flow owns the bulb
+            logging.info("[%s] FLOW %s base=%d peak=%d%s", device.name, intensity,
+                         base, peak, " +lightning" if lightning else "")
+        state_cache[config['id']] = prev
+        return  # flow drives the bulb; skip static level/temp control this tick
+
+    if prev.get('flow_active'):
+        # Flow should stop (rain cleared, light off, or effect disabled).
+        _flow_post('/api/flow/stop', {'id': config['id']})
+        prev['flow_active'], prev['flow'] = False, None
+        prev['state'], prev['level'], prev['kelvin'] = None, -1, -1  # force schedule re-apply
+        logging.info("[%s] FLOW stopped", device.name)
 
     if target_on:
         matter_level = int((target_level / 100.0) * 254)
@@ -350,7 +410,13 @@ def _force_off_all(configs, device_map):
 def run_automation(server: str, config_path: str, api_key: str = None,
                    mode_state_path: str = None,
                    mode_http_host: str = "127.0.0.1",
-                   mode_http_port: int = 7870):
+                   mode_http_port: int = 7870,
+                   yeelight_server: str = None,
+                   yeelight_api_key: str = None):
+    _flow_cfg["server"] = yeelight_server
+    _flow_cfg["api_key"] = yeelight_api_key
+    if yeelight_server:
+        logging.info("Yeelight colour-flow endpoint: %s", yeelight_server)
     dispatcher = CommandDispatcher(rate_limit_delay=0.0)
     controller = MatterController(server_address=server, api_key=api_key)
 
@@ -432,13 +498,20 @@ def main():
                         help="Bind host for the mode HTTP server (default 127.0.0.1; use 0.0.0.0 for LAN).")
     parser.add_argument("--mode-http-port", type=int, default=7870,
                         help="Bind port for the mode HTTP server (default 7870).")
+    parser.add_argument("--yeelight-server", default=os.environ.get("LP_YEELIGHT_SERVER"),
+                        help="Yeelight bridge IP:PORT for rain 'effect: flow' colour-flow "
+                             "animations (e.g. 127.0.0.1:9800). Optional.")
+    parser.add_argument("--yeelight-api-key", default=os.environ.get("LP_YEELIGHT_KEY"),
+                        help="X-API-Key for the Yeelight bridge, if it requires one.")
     args = parser.parse_args()
 
     try:
         run_automation(args.server, args.config, api_key=args.api_key,
                        mode_state_path=args.mode_state,
                        mode_http_host=args.mode_http_host,
-                       mode_http_port=args.mode_http_port)
+                       mode_http_port=args.mode_http_port,
+                       yeelight_server=args.yeelight_server,
+                       yeelight_api_key=args.yeelight_api_key)
     except KeyboardInterrupt:
         logging.info("System halted.")
         sys.exit(0)
