@@ -68,7 +68,10 @@ class MatterDevice:
 
 class LightDevice(MatterDevice):
     def turn_on(self):
-        return self._dispatch(lambda: self.client.get("/api/toggle", {"id": self.id}))
+        # matter_webcontrol v0.28.0 makes mutating endpoints POST-only; a GET
+        # /api/toggle now returns 405. Toggle stays semantically "turn on" here
+        # because the schedule loop only calls it on an off->on transition.
+        return self._dispatch(lambda: self.client.post("/api/toggle", {"id": self.id}))
 
     def turn_off(self):
         return self._dispatch(lambda: self.client.post("/api/level", {"id": self.id, "level": 0}))
