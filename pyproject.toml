@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "light-programmer"
-version = "0.7.0"
+dynamic = ["version"]
 description = "Ecosystem-agnostic smart home lighting automation using Matter protocol"
 readme = "README.md"
 license = {text = "MIT"}
@@ -17,3 +17,13 @@ mcp = ["mcp>=1.0"]
 light-programmer = "light_programmer.programmer:main"
 light-genconfig = "light_programmer.genconfig:main"
 light-programmer-mcp = "light_programmer.mcp_server:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "light_programmer.__version__"}
+
+# Resolving the dynamic version requires the build backend to run package
+# discovery; the repo's flat layout has a second top-level dir (tests_local/)
+# that modern setuptools (>=61) refuses to auto-include ambiguously, so pin
+# the distribution to the package explicitly.
+[tool.setuptools.packages.find]
+include = ["light_programmer*"]

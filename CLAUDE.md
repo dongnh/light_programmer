@@ -147,8 +147,9 @@ Pure Python 3 stdlib (no pip packages). Requires a running `matter_webcontrol` i
 ## Development & Release
 
 - **Version source of truth**: [`light_programmer/__init__.py`](light_programmer/__init__.py)
-  (`__version__`). Bump it on every user-facing change. ⚠️ `pyproject.toml`'s `version`
-  currently lags (`0.7.0` while `__init__` is past `0.12.0`) — keep both in sync when releasing.
+  (`__version__`). Bump it on every user-facing change. `pyproject.toml`'s `version` is
+  **dynamic** from `__init__.py` (`[tool.setuptools.dynamic] version = {attr = …}`), so
+  packaging metadata tracks it automatically — bump only `__init__.py`.
 - **Commit convention**: one commit per release, subject `vX.Y.Z: <imperative summary>` (e.g.
   `v0.12.0: rain "effect: flow" drives Yeelight on-device colour-flow animation`). MINOR for
   new behaviour, PATCH for fixes. Match the existing `git log` style.

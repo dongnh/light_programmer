@@ -1,6 +1,7 @@
 import json
 import threading
 import logging
+import socket
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -42,12 +43,18 @@ class MatterClient:
             data = resp.read().decode("utf-8")
             return json.loads(data) if data else {}
 
+    # Read timeout for the SSE stream socket. matter_webcontrol sends a ':'
+    # keepalive every 15s, so any gap longer than this means the connection is
+    # dead (stall/restart, NAT drop) and we should reconnect rather than block
+    # recv() forever on a half-open socket.
+    STREAM_READ_TIMEOUT = 30.0
+
     def open_stream(self, path: str, params: dict = None):
         url = self.base_url + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
-        return urllib.request.urlopen(req, timeout=None)
+        return urllib.request.urlopen(req, timeout=self.STREAM_READ_TIMEOUT)
 
 
 class MatterDevice:
@@ -101,6 +108,7 @@ class SensorDevice(MatterDevice):
 
         def run_stream():
             while True:
+                stream = None
                 try:
                     stream = self.client.open_stream("/api/subscribe", {"id": self.id})
                     for raw in stream:
@@ -108,8 +116,18 @@ class SensorDevice(MatterDevice):
                         if not line or line.startswith(":"):
                             continue
                         callback_function(line)
+                except socket.timeout:
+                    # No keepalive within STREAM_READ_TIMEOUT -> connection is
+                    # dead (stall/restart/NAT drop). Normal disconnect, reconnect quietly.
+                    logging.info(f"Sensor stream [{self.id}] idle timeout, reconnecting")
                 except Exception as e:
                     logging.warning(f"Sensor stream [{self.id}] disconnected: {e}")
+                finally:
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
                 time.sleep(reconnect_delay)
 
         listener_thread = threading.Thread(target=run_stream, daemon=True)

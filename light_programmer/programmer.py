@@ -363,9 +363,17 @@ def _apply_light(config, device, now, current_minutes, state_cache):
 
     # Optional rain override: while a rain sensor is active, recolor/dim the
     # (already-on) device — e.g. an artificial skylight going overcast.
+    # Rain override must never turn a light ON: gate on the SCHEDULED level
+    # being > 0 so an absolute rain form (`level`/`intensity_level`) can't write
+    # a non-zero brightness onto a scheduled-OFF light. (Multiplicative forms
+    # already collapse to 0; gating here also skips the colour-temp/flow/
+    # moonlight branches for a scheduled-off light.) A moonlight setpoint
+    # (0<level<1) counts as on, so a moonlit skylight can still be recoloured.
     rain_cfg = config.get('rain')
     sched_level = int(round(float(target_state.get('level', 0))))  # pre-override, for flow base/peak
-    raining = bool(rain_cfg) and is_occupied and _rain_active(rain_cfg, now)
+    raining = (bool(rain_cfg) and is_occupied
+               and float(target_state.get('level', 0)) > 0
+               and _rain_active(rain_cfg, now))
     intensity = _rain_intensity(rain_cfg) if raining else None
     if raining:
         _apply_rain_override(target_state, rain_cfg, intensity)

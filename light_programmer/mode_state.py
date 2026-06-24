@@ -25,30 +25,35 @@ def load(path: str) -> dict:
     }
 
 
-def save(path: str, state: dict) -> dict:
+def _save_locked(path: str, state: dict) -> dict:
+    """Atomic write WITHOUT acquiring _lock. Caller MUST already hold _lock."""
     normalized = {
         "auto": bool(state.get("auto", DEFAULT["auto"])),
         "kill": bool(state.get("kill", DEFAULT["kill"])),
     }
-    with _lock:
-        d = os.path.dirname(os.path.abspath(path)) or "."
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".mode_state.", dir=d)
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".mode_state.", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(normalized, f)
+        os.replace(tmp, path)
+    except Exception:
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(normalized, f)
-            os.replace(tmp, path)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return normalized
+
+
+def save(path: str, state: dict) -> dict:
+    with _lock:
+        return _save_locked(path, state)
 
 
 def update(path: str, **changes) -> dict:
     with _lock:
         current = load(path)
         current.update({k: bool(v) for k, v in changes.items() if v is not None})
-    return save(path, current)
+        return _save_locked(path, current)
