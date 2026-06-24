@@ -9,12 +9,17 @@ from . import mode_state
 
 
 def make_server(state_path: str, host: str, port: int,
-                on_change: Optional[Callable] = None) -> ThreadingHTTPServer:
+                on_change: Optional[Callable] = None,
+                lights_provider: Optional[Callable] = None) -> ThreadingHTTPServer:
     """Build a ThreadingHTTPServer; caller is responsible for serve_forever()
     in a background thread.
 
     `on_change` is invoked (no args) after every successful POST so the main
     loop can wake up and reapply state immediately.
+
+    `lights_provider` (optional) returns the current per-light status list
+    (`[{id, name, connected}, …]`) for `GET /lights`, consumed by the HomeKit
+    bridge to drive one Contact Sensor per light.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -40,8 +45,14 @@ def make_server(state_path: str, host: str, port: int,
                 return {}
 
         def do_GET(self):  # noqa: N802
-            if self.path.rstrip("/") == "/mode":
+            path = self.path.rstrip("/")
+            if path == "/mode":
                 self._send(200, mode_state.load(state_path))
+            elif path == "/lights":
+                if lights_provider is None:
+                    self._send(404, {"error": "lights not available"})
+                else:
+                    self._send(200, {"lights": lights_provider()})
             else:
                 self._send(404, {"error": "not found"})
 
@@ -73,8 +84,10 @@ def make_server(state_path: str, host: str, port: int,
 
 
 def start_in_thread(state_path: str, host: str, port: int,
-                    on_change: Optional[Callable] = None) -> ThreadingHTTPServer:
-    server = make_server(state_path, host, port, on_change=on_change)
+                    on_change: Optional[Callable] = None,
+                    lights_provider: Optional[Callable] = None) -> ThreadingHTTPServer:
+    server = make_server(state_path, host, port, on_change=on_change,
+                         lights_provider=lights_provider)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     logging.info(f"Mode HTTP server listening on {host}:{port} (state={state_path})")

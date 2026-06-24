@@ -15,6 +15,7 @@ from .matter_lib import (
     MatterController,
     SensorDevice,
     LightDevice,
+    MatterClient,
 )
 from . import mode_state, mode_http
 
@@ -498,6 +499,31 @@ def _force_off_all(configs, device_map):
             logging.warning(f"KILL turn_off failed for {cfg['id']}: {e}")
 
 
+ONLINE_POLL_INTERVAL = 10.0  # seconds between matter_webcontrol reachability polls
+ONLINE_POLL_TIMEOUT = 3.0    # short per-request timeout for the reachability poll (own client)
+
+
+def _fetch_online(client) -> dict | None:
+    """Map device_id -> online bool from matter_webcontrol's /api/metadata.
+
+    Returns None when the controller itself is unreachable, so callers keep the
+    last known per-light state instead of flapping every light to disconnected.
+    A configured light that is simply absent from the metadata (e.g. a logical
+    bridge that dropped) is reported by its caller as offline.
+    """
+    try:
+        data = client.get("/api/metadata")
+    except Exception as e:  # noqa: BLE001 - a poll failure must never kill the loop
+        logging.warning("online poll failed: %s", e)
+        return None
+    out = {}
+    for dev in data.get("devices", []):
+        did = dev.get("id")
+        if did:
+            out[did] = bool(dev.get("online", True))
+    return out
+
+
 def run_automation(server: str, config_path: str, api_key: str = None,
                    mode_state_path: str = None,
                    mode_http_host: str = "127.0.0.1",
@@ -511,6 +537,12 @@ def run_automation(server: str, config_path: str, api_key: str = None,
     dispatcher = CommandDispatcher(rate_limit_delay=0.0)
     controller = MatterController(server_address=server, api_key=api_key)
 
+    # Separate, short-timeout client for the off-loop reachability poll so a
+    # stalled matter_webcontrol can never block the 1Hz control loop (which uses
+    # controller.client with its 5s timeout). Distinct instance => the poll can't
+    # share or mutate the control client's timeout.
+    online_client = MatterClient(server, api_key=api_key, timeout=ONLINE_POLL_TIMEOUT)
+
     for dev in controller.devices.values():
         dev.dispatcher = dispatcher
 
@@ -518,6 +550,56 @@ def run_automation(server: str, config_path: str, api_key: str = None,
         configs = json.load(f)
 
     device_map = {dev.id: dev for dev in controller.devices.values()}
+
+    # Per-light runtime status for the HomeKit bridge. An optional config `name`
+    # overrides the controller's name (and makes the logs read friendlier); the
+    # `connected` flag is refreshed from matter_webcontrol's `online` and served
+    # via GET /lights so the bridge can drive one Contact Sensor per light.
+    # Seed the roster from the CONFIGURED light entries, NOT from the boot-time
+    # /api/metadata snapshot: a light whose logical bridge is down at LP start
+    # (the Casambi boot race; office skylights) must still appear in /lights so
+    # the bridge can create its Contact Sensor. A top-level config entry is a
+    # light when it carries a `schedule` and is not a legacy AC entry; sensors
+    # only appear nested inside a light's `sensor`/`sensor_condition`, never as
+    # top-level entries. connected starts False and is flipped on by the online
+    # poll once the device is reachable.
+    light_status = {}  # id -> {"name": str, "connected": bool}
+    for cfg in configs:
+        cid = cfg.get("id")
+        if not cid or cfg.get("type") == "ac" or "schedule" not in cfg:
+            continue
+        dev = device_map.get(cid)
+        if cfg.get("name") and isinstance(dev, LightDevice):
+            dev.name = cfg["name"]
+        name = cfg.get("name") or (dev.name if isinstance(dev, LightDevice) else cid)
+        light_status[cid] = {"name": name, "connected": False}
+        if not isinstance(dev, LightDevice):
+            logging.warning(
+                "Configured light %s not found in controller metadata at "
+                "startup (offline/bridge down?) — listed in /lights as "
+                "disconnected until it appears", cid)
+
+    def lights_provider():
+        return [
+            {"id": cid, "name": v["name"], "connected": v["connected"]}
+            for cid, v in light_status.items()
+        ]
+
+    # Reachability poll runs OFF the control loop on its own daemon thread so a
+    # stalled matter_webcontrol never blocks scheduling. It only mutates the
+    # bool `connected` values of light_status entries created at startup; the
+    # KEY SET is fixed before this thread starts and never changes afterwards,
+    # so the HTTP server thread reading via lights_provider is GIL-safe without
+    # an explicit lock (no concurrent insert/delete; bool assignment is atomic).
+    def _online_poll_loop():
+        while True:
+            online = _fetch_online(online_client)
+            if online is not None:
+                for cid, v in light_status.items():
+                    v["connected"] = online.get(cid, False)
+            time.sleep(ONLINE_POLL_INTERVAL)
+
+    threading.Thread(target=_online_poll_loop, daemon=True).start()
 
     for dev in controller.devices.values():
         if isinstance(dev, SensorDevice):
@@ -529,6 +611,7 @@ def run_automation(server: str, config_path: str, api_key: str = None,
         mode_http.start_in_thread(
             mode_state_path, mode_http_host, mode_http_port,
             on_change=state_changed_event.set,
+            lights_provider=lights_provider,
         )
         logging.info(f"Mode state file: {mode_state_path}")
 

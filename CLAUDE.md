@@ -20,12 +20,21 @@ light_programmer/              # Python package
     programmer.py              # Automation engine: CommandDispatcher, light schedules,
                                  occupancy gating, main 1Hz loop. Honors mode flags
                                  (auto/kill) loaded each tick from --mode-state JSON.
+                                 An optional per-light `name` in config overrides the
+                                 controller name (logs + /lights). A dedicated
+                                 daemon thread (not the 1Hz loop) polls
+                                 matter_webcontrol `online` (_fetch_online) every
+                                 ~10s via its own short-timeout client into a
+                                 per-light `connected` flag served at GET /lights,
+                                 so a stalled controller can't block scheduling.
                                  AC control was removed in v0.7.0; AC/climate APIs of
                                  matter_webcontrol are still wrapped by matter_lib and
                                  exposed via the MCP server, but the schedule loop
                                  never reads climate sensors or writes /api/ac.
     mode_state.py              # Atomic JSON store for {auto, kill} flags shared across processes.
-    mode_http.py               # Tiny stdlib HTTP server: GET/POST /mode, POST /kill.
+    mode_http.py               # Tiny stdlib HTTP server: GET/POST /mode, POST /kill,
+                                 GET /lights ([{id, name, connected}] — per-light
+                                 reachability polled from matter_webcontrol's `online`).
                                  Consumed by the homekit-bridge (separate repo).
     genconfig.py               # Auto-generates config JSON from /api/metadata.
     mcp_server.py              # Optional MCP server (FastMCP). Tools for device discovery,
