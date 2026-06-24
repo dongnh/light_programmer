@@ -613,6 +613,12 @@ LIGHT entry:
   requires --yeelight-server (like rain flow). Moonlight is a fixed warm white so
   its points may omit kelvin; if a schedule uses colour temperature, keep "kelvin"
   on EVERY point (incl. moonlight ones) so neighbouring CT interpolation isn't blanked.
+  Optional "unoccupied": [{"start":"HH:MM","end":"HH:MM","level":<n>}] — what to do
+  when sensor_condition is FALSE, instead of plain off. First matching window wins
+  (cross-midnight ok); its level uses the same 0/sub-1-moonlight/>=1-daylight
+  convention; outside every window -> off. The schedule is the OCCUPIED behaviour,
+  "unoccupied" is the AWAY behaviour (e.g. evening moonlight glow when away, dark
+  overnight). Omit it for the legacy "away = off".
 
 AC entry (climate-driven, no schedule):
   { "id": "dev_*", "type": "ac",

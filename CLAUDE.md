@@ -46,6 +46,14 @@ sample.json                    # Real-world config example with 11 devices
 - **Sensor logic**: Two modes for light entries:
   - Simple: `"sensor": [{id, timeout}]` — any sensor active = device enabled.
   - Advanced: `"sensor_condition"` — AST with `AND`, `OR`, `NOT`, `sensor`, `time_window` nodes.
+- **Unoccupied fallback (v0.14.0)**: optional `"unoccupied": [{start, end, level}]` on a light
+  entry. By default a light just turns OFF when its `sensor`/`sensor_condition` is false. With
+  `unoccupied`, the AWAY state becomes time-aware instead: the first window (HH:MM, cross-midnight
+  ok) containing now wins, and its `level` uses the schedule convention (`0`=off,
+  `0<level<1`=moonlight, `>=1`=daylight); outside every window → off. The `schedule` defines the
+  OCCUPIED behaviour, `unoccupied` the AWAY behaviour — e.g. an office skylight that shows a
+  moonlight glow in the evening when no one is at the desk (`{start:20:00,end:23:00,level:0.999}`)
+  but goes fully dark overnight. See `_unoccupied_level` in [programmer.py](light_programmer/programmer.py:115).
 - **Rain override** (optional `"rain"` block on a light entry): while a rain sensor is active
   AND the light is on, overlay rain-time values onto the scheduled state. Does not turn the
   light on/off — only recolors/dims an already-on device (e.g. an artificial skylight going

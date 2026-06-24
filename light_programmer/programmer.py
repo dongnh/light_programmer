@@ -112,6 +112,29 @@ def _is_moon_level(level) -> bool:
         return False
 
 
+def _unoccupied_level(unocc_cfg, current_minutes: int):
+    """Brightness to hold while a light is UNOCCUPIED. Default 0 (off).
+
+    Without an `unoccupied` block a light just turns off when its sensor_condition
+    is false — the original behaviour. An `unoccupied` block is a list of
+    {start, end, level} windows (HH:MM, cross-midnight ok, same form as
+    time_window); the first window containing `current_minutes` wins and its
+    `level` follows the schedule convention (0 = off, 0<level<1 = moonlight,
+    level>=1 = daylight). Outside every window -> 0 (off). This lets an
+    unoccupied light fall back to a dim moonlight glow in one time band and to
+    full off in another (e.g. evening ambient -> off overnight)."""
+    if not unocc_cfg:
+        return 0
+    for w in unocc_cfg:
+        start = time_to_minutes(w.get('start', '00:00'))
+        end = time_to_minutes(w.get('end', '23:59'))
+        inside = (start <= current_minutes < end) if start <= end \
+            else (current_minutes >= start or current_minutes < end)
+        if inside:
+            return w.get('level', 0)
+    return 0
+
+
 def calculate_current_state(schedule: list, current_minutes: int) -> dict:
     sorted_sched = sorted(schedule, key=lambda x: time_to_minutes(x['time']))
     if not sorted_sched: return {"level": 0, "_moon": False}
@@ -352,7 +375,17 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     # (0 -> daylight) or a rain-scaled fraction is NOT moonlight — it collapses to
     # off, exactly as the pre-moonlight int() truncation did.
     seg_is_moon = bool(target_state.get('_moon'))
-    level_f = float(target_state.get('level', 0)) if is_occupied else 0.0
+    if is_occupied:
+        level_f = float(target_state.get('level', 0))
+    else:
+        # Unoccupied: fall back to the configured `unoccupied` windows (default
+        # OFF). A sub-1 window level requests moonlight instead of off — e.g. a
+        # skylight that glows dim in the evening when no one is at the desk, then
+        # goes fully dark overnight. This is the only way to get a non-off
+        # unoccupied state; the schedule defines the OCCUPIED behaviour.
+        u_level = _unoccupied_level(config.get('unoccupied'), current_minutes)
+        level_f = float(u_level)
+        seg_is_moon = _is_moon_level(u_level)
     if not seg_is_moon and 0.0 < level_f < 1.0:
         level_f = 0.0  # daylight ramp / rain fraction below 1% -> off (legacy behaviour)
     is_moon = seg_is_moon and 0.0 < level_f < 1.0
