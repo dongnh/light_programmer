@@ -20,6 +20,10 @@ Security env vars:
     LP_MCP_ALLOW_DESTRUCTIVE  Set to 1/true/yes to register the destructive tools
                               (write_config/upsert_entry/remove_entry/set_light/set_ac/
                               restart_service/update_repo). Off by default.
+    LP_MCP_ALLOWED_HOSTS      Comma-separated extra Host values to allow past the
+                              DNS-rebinding check (loopback + this host's hostname/
+                              .local + LAN IPs are auto-detected). Set only if a
+                              client reaches the server via a name we can't discover.
 """
 from __future__ import annotations
 
@@ -737,13 +741,43 @@ def main():  # entry point for `light-programmer-mcp`
             "shared secret, or bind --host 127.0.0.1 for local-only access."
         )
 
-    # Keep DNS-rebinding protection ON. Instead of disabling it (which the SDK
-    # rejected with 'Invalid Host header' on non-loopback binds), allow exactly
-    # the host:port we bind to plus localhost. This blocks browser DNS-rebinding
-    # while letting legitimate LAN clients through.
+    # Keep DNS-rebinding protection ON, but allow-list the Host values clients
+    # actually send — NOT the bind address. A 0.0.0.0/:: bind is never a real
+    # Host header, so enumerate loopback + this machine's hostname/.local + LAN
+    # IPs (each bare and with :port, since the SDK matches the full Host header
+    # incl. port). This blocks browser DNS-rebinding (Host: evil.example.com is
+    # rejected) while letting legitimate loopback + LAN clients through. The
+    # mandatory bearer token above is the primary protection; this is defence
+    # in depth. Override the auto-detected set with LP_MCP_ALLOWED_HOSTS
+    # (comma-separated) if a client connects via a name we can't discover.
     from mcp.server.transport_security import TransportSecuritySettings
-    allowed_hosts = ["127.0.0.1", "localhost", f"{args.host}", f"{args.host}:{args.port}"]
-    allowed_origins = [f"http://{args.host}:{args.port}", "http://localhost", "http://127.0.0.1"]
+    hosts = {"127.0.0.1", "localhost", "::1"}
+    if args.host not in ("0.0.0.0", "::"):
+        hosts.add(args.host)
+    try:
+        import socket as _socket
+        hn = _socket.gethostname()
+        hosts.add(hn)
+        if not hn.endswith(".local"):
+            hosts.add(hn + ".local")
+        for info in _socket.getaddrinfo(hn, None):
+            hosts.add(info[4][0])
+    except Exception:  # pragma: no cover - best effort
+        pass
+    try:
+        import socket as _socket
+        probe = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        probe.connect(("192.0.2.1", 1))  # TEST-NET-1, no packets actually sent
+        hosts.add(probe.getsockname()[0])
+        probe.close()
+    except Exception:  # pragma: no cover - best effort
+        pass
+    extra = os.environ.get("LP_MCP_ALLOWED_HOSTS", "")
+    hosts |= {h.strip() for h in extra.split(",") if h.strip()}
+    allowed_hosts = sorted(hosts | {f"{h}:{args.port}" for h in hosts})
+    allowed_origins = sorted(
+        {f"http://{h}:{args.port}" for h in hosts} | {f"http://{h}" for h in hosts}
+    )
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed_hosts,
