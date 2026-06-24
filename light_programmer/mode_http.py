@@ -10,7 +10,8 @@ from . import mode_state
 
 def make_server(state_path: str, host: str, port: int,
                 on_change: Optional[Callable] = None,
-                lights_provider: Optional[Callable] = None) -> ThreadingHTTPServer:
+                lights_provider: Optional[Callable] = None,
+                api_key: Optional[str] = None) -> ThreadingHTTPServer:
     """Build a ThreadingHTTPServer; caller is responsible for serve_forever()
     in a background thread.
 
@@ -20,6 +21,9 @@ def make_server(state_path: str, host: str, port: int,
     `lights_provider` (optional) returns the current per-light status list
     (`[{id, name, connected}, …]`) for `GET /lights`, consumed by the HomeKit
     bridge to drive one Contact Sensor per light.
+
+    `api_key` (optional): when set, every request must carry a matching
+    `X-API-Key` header or it gets 401; unset = unauthenticated, fine for loopback.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -44,7 +48,21 @@ def make_server(state_path: str, host: str, port: int,
             except json.JSONDecodeError:
                 return {}
 
+        def _authed(self) -> bool:
+            """True if no key is configured, or the request carries a matching
+            X-API-Key. On mismatch, emits 401 and returns False."""
+            if not api_key:
+                return True
+            if self.headers.get("X-API-Key") == api_key:
+                return True
+            logging.warning("mode_http: rejected unauthenticated %s %s from %s",
+                            self.command, self.path, self.client_address[0])
+            self._send(401, {"error": "unauthorized"})
+            return False
+
         def do_GET(self):  # noqa: N802
+            if not self._authed():
+                return
             path = self.path.rstrip("/")
             if path == "/mode":
                 self._send(200, mode_state.load(state_path))
@@ -57,6 +75,8 @@ def make_server(state_path: str, host: str, port: int,
                 self._send(404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802
+            if not self._authed():
+                return
             path = self.path.rstrip("/")
             body = self._read_json()
             if path == "/mode":
@@ -85,10 +105,17 @@ def make_server(state_path: str, host: str, port: int,
 
 def start_in_thread(state_path: str, host: str, port: int,
                     on_change: Optional[Callable] = None,
-                    lights_provider: Optional[Callable] = None) -> ThreadingHTTPServer:
+                    lights_provider: Optional[Callable] = None,
+                    api_key: Optional[str] = None) -> ThreadingHTTPServer:
+    if not api_key and host not in ("127.0.0.1", "localhost", "::1"):
+        logging.warning("Mode HTTP server bound to non-loopback host %s with NO "
+                        "X-API-Key — /mode, /kill and /lights are unauthenticated "
+                        "and reachable on the LAN. Set --mode-http-key / "
+                        "LP_MODE_HTTP_KEY.", host)
     server = make_server(state_path, host, port, on_change=on_change,
-                         lights_provider=lights_provider)
+                         lights_provider=lights_provider, api_key=api_key)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    logging.info(f"Mode HTTP server listening on {host}:{port} (state={state_path})")
+    logging.info(f"Mode HTTP server listening on {host}:{port} (state={state_path}, "
+                 f"auth={'on' if api_key else 'off'})")
     return server

@@ -7,11 +7,24 @@ read/write the automation config, and control devices directly.
 Run:
     pip install light-programmer[mcp]
     light-programmer-mcp                                      # stdio (for Claude Desktop / Code)
-    light-programmer-mcp --transport http --host 0.0.0.0 --port 7860   # LAN access
+    # LAN access — a non-loopback bind REQUIRES a bearer token; destructive
+    # tools (config writes, device control, service/repo mgmt) are opt-in:
+    LP_MCP_TOKEN=<secret> LP_MCP_ALLOW_DESTRUCTIVE=1 LP_CONFIG_DIR=/path/to/configs \
+        light-programmer-mcp --transport http --host 0.0.0.0 --port 7860
+
+Security env vars:
+    LP_CONFIG_DIR             Confine config CRUD tools to this dir (else the dir of
+                              LP_CONFIG_PATH, else cwd). Paths escaping it are rejected.
+    LP_MCP_TOKEN              Bearer secret. REQUIRED for a non-loopback bind; clients
+                              send `Authorization: Bearer <token>`. Optional on loopback.
+    LP_MCP_ALLOW_DESTRUCTIVE  Set to 1/true/yes to register the destructive tools
+                              (write_config/upsert_entry/remove_entry/set_light/set_ac/
+                              restart_service/update_repo). Off by default.
 """
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import logging
 import os
@@ -44,6 +57,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 mcp = FastMCP("light-programmer")
 
 
+# Destructive tools (config writes, device control, service/repo management) are
+# only registered when the operator opts in via LP_MCP_ALLOW_DESTRUCTIVE=1. Off
+# by default so a misconfigured HTTP bind cannot reach RCE-grade tooling.
+ALLOW_DESTRUCTIVE = os.environ.get("LP_MCP_ALLOW_DESTRUCTIVE", "").strip().lower() in ("1", "true", "yes")
+
+
+def _destructive_tool(*d_args, **d_kwargs):
+    """Register a tool only when LP_MCP_ALLOW_DESTRUCTIVE is set; otherwise drop it."""
+    def deco(fn):
+        if ALLOW_DESTRUCTIVE:
+            return mcp.tool(*d_args, **d_kwargs)(fn)
+        return fn  # not registered; invisible to clients
+    return deco
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -53,7 +81,40 @@ def _client(server: str, api_key: Optional[str] = None) -> MatterClient:
     return MatterClient(server, api_key=api_key)
 
 
+# ---------------------------------------------------------------------------
+# Config-path confinement: every config CRUD tool resolves its caller-supplied
+# path under a single allow-listed base directory and rejects anything that
+# escapes it (path traversal, absolute paths elsewhere, symlinks). Base dir is
+# LP_CONFIG_DIR if set, else the directory of LP_CONFIG_PATH, else the process
+# cwd. Both are realpath'd so symlinked roots are normalised consistently.
+# ---------------------------------------------------------------------------
+
+def _config_base_dir() -> str:
+    base = os.environ.get("LP_CONFIG_DIR")
+    if not base:
+        cfg = os.environ.get("LP_CONFIG_PATH")
+        base = os.path.dirname(cfg) if cfg else os.getcwd()
+    return os.path.realpath(base)
+
+
+def _resolve_config_path(path: str) -> str:
+    """Resolve `path` under the config base dir; raise if it escapes."""
+    if not path or not isinstance(path, str):
+        raise ValueError("config_path must be a non-empty string")
+    base = _config_base_dir()
+    candidate = path if os.path.isabs(path) else os.path.join(base, path)
+    parent = os.path.realpath(os.path.dirname(candidate) or base)
+    resolved = os.path.join(parent, os.path.basename(candidate))
+    if resolved != base and os.path.commonpath([base, parent]) != base:
+        raise ValueError(
+            f"config_path '{path}' escapes the allowed config dir '{base}'. "
+            f"Set LP_CONFIG_DIR to widen the allow-list."
+        )
+    return resolved
+
+
 def _load(path: str) -> list:
+    path = _resolve_config_path(path)
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, list):
@@ -62,6 +123,7 @@ def _load(path: str) -> list:
 
 
 def _save(path: str, entries: list) -> None:
+    path = _resolve_config_path(path)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(entries, f, indent=2, ensure_ascii=False)
@@ -185,9 +247,13 @@ def read_config(config_path: str) -> list:
     return _load(config_path)
 
 
-@mcp.tool()
+@_destructive_tool()
 def write_config(config_path: str, entries: list) -> dict:
     """Replace the entire config file. Validates first; refuses on error."""
+    if not isinstance(entries, list) or not entries:
+        return {"ok": False, "errors": [
+            "refusing to write an empty or non-list config; "
+            "use remove_entry to delete a single entry"]}
     errs = []
     for i, e in enumerate(entries):
         errs.extend(_validate_entry(e, i))
@@ -206,7 +272,7 @@ def validate_config(entries: list) -> dict:
     return {"ok": not errs, "errors": errs}
 
 
-@mcp.tool()
+@_destructive_tool()
 def upsert_entry(config_path: str, entry: dict) -> dict:
     """Insert or replace an entry in the config, matched by 'id'."""
     errs = _validate_entry(entry, 0)
@@ -224,7 +290,7 @@ def upsert_entry(config_path: str, entry: dict) -> dict:
     return {"ok": True, "action": "inserted", "id": target_id}
 
 
-@mcp.tool()
+@_destructive_tool()
 def remove_entry(config_path: str, device_id: str) -> dict:
     """Delete the entry with the given device id."""
     entries = _load(config_path)
@@ -239,7 +305,7 @@ def remove_entry(config_path: str, device_id: str) -> dict:
 # Direct device control (handy for quick experimentation)
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@_destructive_tool()
 def set_light(server: str, light_id: str, level: int,
               kelvin: Optional[int] = None, api_key: Optional[str] = None) -> dict:
     """Set a light's level (0–100) and optional color temperature in Kelvin."""
@@ -251,7 +317,7 @@ def set_light(server: str, light_id: str, level: int,
     return {"ok": True, "id": light_id, "level": level, "kelvin": kelvin}
 
 
-@mcp.tool()
+@_destructive_tool()
 def set_ac(server: str, ac_id: str, on: bool, mode: str = "cool",
            setpoint: Optional[float] = None, api_key: Optional[str] = None) -> dict:
     """Set an AC: on/off, mode (cool/heat/dry/fan/auto/off), optional °C setpoint."""
@@ -346,7 +412,7 @@ def get_service_status(label: str) -> dict:
     return {"ok": True, "label": label, "running": parsed["pid"] is not None, **parsed}
 
 
-@mcp.tool()
+@_destructive_tool()
 def restart_service(label: str) -> dict:
     """Kickstart-restart a managed launchd service (`launchctl kickstart -k`).
 
@@ -491,7 +557,7 @@ def list_repo_tags(name: str, limit: int = 20) -> dict:
     return {"ok": True, "name": name, "tags": tags}
 
 
-@mcp.tool()
+@_destructive_tool()
 def update_repo(name: str, ref: Optional[str] = None,
                 restart: bool = True, reinstall: bool = True) -> dict:
     """Pull or check out a specific ref, reinstall, optionally restart services.
@@ -656,27 +722,73 @@ def main():  # entry point for `light-programmer-mcp`
         return
 
     # FastMCP bind address.
-    try:
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-    except AttributeError:
-        logging.warning("FastMCP.settings unavailable; relying on transport defaults.")
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
 
-    # MCP SDK enables DNS-rebinding protection by default, which only trusts
-    # 127.0.0.1/localhost. For LAN deployments the operator is explicitly
-    # opting in to network exposure, so we relax the host/origin filter.
-    try:
-        from mcp.server.transport_security import TransportSecuritySettings
-        mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=False
+    loopback = args.host in ("127.0.0.1", "localhost", "::1")
+    token = os.environ.get("LP_MCP_TOKEN", "").strip()
+
+    # Auth policy: a non-loopback bind exposes RCE-capable tooling to the LAN,
+    # so it MUST carry a bearer token. A loopback bind is trusted like stdio.
+    if not loopback and not token:
+        raise SystemExit(
+            "Refusing to bind MCP HTTP transport to a non-loopback host "
+            f"({args.host}) without authentication. Set LP_MCP_TOKEN to a "
+            "shared secret, or bind --host 127.0.0.1 for local-only access."
         )
-    except Exception as e:  # pragma: no cover
-        logging.warning(f"Could not relax transport_security ({e}); "
-                        f"requests may be rejected with 'Invalid Host header'.")
+
+    # Keep DNS-rebinding protection ON. Instead of disabling it (which the SDK
+    # rejected with 'Invalid Host header' on non-loopback binds), allow exactly
+    # the host:port we bind to plus localhost. This blocks browser DNS-rebinding
+    # while letting legitimate LAN clients through.
+    from mcp.server.transport_security import TransportSecuritySettings
+    allowed_hosts = ["127.0.0.1", "localhost", f"{args.host}", f"{args.host}:{args.port}"]
+    allowed_origins = [f"http://{args.host}:{args.port}", "http://localhost", "http://127.0.0.1"]
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
 
     transport_name = "streamable-http" if args.transport == "http" else "sse"
-    logging.info(f"Starting MCP transport={transport_name} bind={args.host}:{args.port}")
-    mcp.run(transport=transport_name)
+    logging.info(
+        "Starting MCP transport=%s bind=%s:%s auth=%s destructive_tools=%s",
+        transport_name, args.host, args.port,
+        "bearer" if token else "none(loopback)",
+        "enabled" if ALLOW_DESTRUCTIVE else "disabled",
+    )
+
+    if not token:
+        # Loopback, no token: original behaviour, let FastMCP own the event loop.
+        mcp.run(transport=transport_name)
+        return
+
+    # Token present: wrap the Starlette app in a bearer-check middleware and
+    # serve via uvicorn ourselves (mirrors FastMCP.run_streamable_http_async/
+    # run_sse_async, which only wrap the same app in uvicorn.Config).
+    import uvicorn
+    from starlette.responses import JSONResponse
+
+    app = mcp.streamable_http_app() if args.transport == "http" else mcp.sse_app()
+    expected = token
+
+    async def _auth_middleware(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers") or [])
+        auth = headers.get(b"authorization", b"").decode("latin-1")
+        presented = auth[7:] if auth[:7].lower() == "bearer " else ""
+        if not (presented and hmac.compare_digest(presented, expected)):
+            resp = JSONResponse({"error": "unauthorized"}, status_code=401,
+                                headers={"WWW-Authenticate": "Bearer"})
+            await resp(scope, receive, send)
+            return
+        await app(scope, receive, send)
+
+    config = uvicorn.Config(_auth_middleware, host=args.host, port=args.port,
+                            log_level=mcp.settings.log_level.lower())
+    uvicorn.Server(config).run()
 
 
 if __name__ == "__main__":

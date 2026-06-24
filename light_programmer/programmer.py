@@ -536,6 +536,7 @@ def run_automation(server: str, config_path: str, api_key: str = None,
                    mode_state_path: str = None,
                    mode_http_host: str = "127.0.0.1",
                    mode_http_port: int = 7870,
+                   mode_http_key: str = None,
                    yeelight_server: str = None,
                    yeelight_api_key: str = None):
     _flow_cfg["server"] = yeelight_server
@@ -620,6 +621,7 @@ def run_automation(server: str, config_path: str, api_key: str = None,
             mode_state_path, mode_http_host, mode_http_port,
             on_change=state_changed_event.set,
             lights_provider=lights_provider,
+            api_key=mode_http_key,
         )
         logging.info(f"Mode state file: {mode_state_path}")
 
@@ -680,6 +682,10 @@ def main():
                         help="Bind host for the mode HTTP server (default 127.0.0.1; use 0.0.0.0 for LAN).")
     parser.add_argument("--mode-http-port", type=int, default=7870,
                         help="Bind port for the mode HTTP server (default 7870).")
+    parser.add_argument("--mode-http-key", default=os.environ.get("LP_MODE_HTTP_KEY"),
+                        help="X-API-Key required on the mode HTTP server (/mode, /kill, "
+                             "/lights). Unset = unauthenticated; recommended when binding "
+                             "non-loopback. Or set LP_MODE_HTTP_KEY.")
     parser.add_argument("--yeelight-server", default=os.environ.get("LP_YEELIGHT_SERVER"),
                         help="Yeelight bridge IP:PORT for rain 'effect: flow' colour-flow "
                              "animations (e.g. 127.0.0.1:9800). Optional.")
@@ -692,6 +698,7 @@ def main():
                        mode_state_path=args.mode_state,
                        mode_http_host=args.mode_http_host,
                        mode_http_port=args.mode_http_port,
+                       mode_http_key=args.mode_http_key,
                        yeelight_server=args.yeelight_server,
                        yeelight_api_key=args.yeelight_api_key)
     except KeyboardInterrupt:

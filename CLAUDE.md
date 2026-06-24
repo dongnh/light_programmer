@@ -42,6 +42,13 @@ light_programmer/              # Python package
                                  and mode-flag get/set.
                                  Installed via `pip install light-programmer[mcp]`,
                                  launched as `light-programmer-mcp` (stdio).
+                                 Security: config CRUD paths are confined to
+                                 LP_CONFIG_DIR (else dirname of LP_CONFIG_PATH,
+                                 else cwd). A non-loopback HTTP/SSE bind REQUIRES
+                                 LP_MCP_TOKEN (bearer auth) and keeps DNS-rebinding
+                                 protection on; destructive tools (config writes,
+                                 device control, restart_service/update_repo) are
+                                 only registered when LP_MCP_ALLOW_DESTRUCTIVE=1.
 pyproject.toml                 # Package config, CLI entry points
 sample.json                    # Real-world config example with 11 devices
 ```
@@ -128,6 +135,10 @@ light-programmer --server <IP:PORT> --config config.json [--api-key <KEY>]
 - `--mode-state PATH` / `LP_MODE_STATE` — enables the auto/kill flags + `/mode` HTTP endpoint.
   Without it, mode flags and HomeKit-bridge integration are off.
 - `--mode-http-host` (default `127.0.0.1`; use `0.0.0.0` for LAN) / `--mode-http-port` (7870).
+- `--mode-http-key` / `LP_MODE_HTTP_KEY` — optional `X-API-Key` for the mode HTTP server
+  (`/mode`, `/kill`, `/lights`). Unset = unauthenticated (fine for loopback); strongly
+  recommended when `--mode-http-host 0.0.0.0`. The HomeKit bridge must send a matching
+  `programmer_api_key`. A non-loopback bind with no key logs a startup WARNING.
 - `--yeelight-server IP:PORT` / `LP_YEELIGHT_SERVER` and `--yeelight-api-key` / `LP_YEELIGHT_KEY`
   — only needed when a config uses rain `"effect": "flow"`. Optional.
 
