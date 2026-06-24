@@ -69,6 +69,19 @@ sample.json                    # Real-world config example with 11 devices
     When rain clears / light turns off / effect is removed, the loop POSTs `/api/flow/stop`.
     Flow is best-effort: bridge errors are logged and never block the loop. See
     `_flow_post`/`_flow_changed` in [programmer.py](light_programmer/programmer.py:31).
+- **Moonlight / night-light channel (v0.13.0)**: a schedule `level` is now a FLOAT. `0` = off,
+  `level >= 1` = normal daylight (the old 0–100 scale), and a literal `0 < level < 1` setpoint =
+  MOONLIGHT — route the bulb to its physical night-light channel via the Yeelight bridge's
+  `POST /api/moonlight {id, on, level}` (`nl_br = level × 100`, so `0.3` → 30%). Only ceiling
+  lights + Bedside Lamp 2/3 have the channel; the bridge falls back to the lowest normal
+  brightness otherwise. Moonlight is **opt-in**: only an explicit sub-1 setpoint in a bracketing
+  schedule point triggers it (`target_state['_moon']`); a sub-1 value that is merely an
+  interpolation ramp (0 → daylight) or a rain-scaled fraction collapses to OFF, exactly like the
+  pre-moonlight `int()` truncation. Needs `--yeelight-server` (like rain flow); without it,
+  moonlight falls back to the lowest normal level so the light still turns on. Moonlight is a
+  fixed warm white, so its points may omit `kelvin` — but if a schedule uses colour temperature,
+  keep `kelvin` on EVERY point (incl. the moonlight ones) so neighbouring CT interpolation isn't
+  blanked. See `_is_moon_level` / `_apply_light` in [programmer.py](light_programmer/programmer.py:107).
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
 - **State caching**: Only sends commands when target differs from cached state (brightness ±2,
   color temp >50K threshold).
@@ -138,8 +151,44 @@ Pure Python 3 stdlib (no pip packages). Requires a running `matter_webcontrol` i
   venv path, launchd labels, and config location before touching the live install.
 - **Required runtime peer**: a live [`matter_webcontrol`](https://github.com/dongnh/matter_webcontrol)
   instance. This package only talks to its REST/SSE API; it never speaks Matter directly.
-- **Surrounding stack** (separate repos, push to `github.com/dongnh`): `matter-weather-sensor`
-  (rain/illuminance sensors feeding the rain override), the Yeelight bridge (colour-flow target),
-  `homekit-bridge` (consumes `/mode` for LP Auto / LP Kill switches), and the
-  `matter-homekit-bridge` AC/heater stack. Light_programmer is the schedule brain; these are
-  its sensors and actuators.
+
+### Repos in this constellation
+
+Light_programmer is the schedule brain; the repos below are its sensors, actuators, and host
+infrastructure. All push to `github.com/dongnh`. Most run as launchd services on
+`panda@192.168.1.220` (see auto-memory for ports, labels, venvs).
+
+**Core**
+- [`matter_webcontrol`](https://github.com/dongnh/matter_webcontrol) — Matter controller + REST/SSE
+  API that every other repo (including this one) talks to. The hub of the stack.
+
+**Sensors → matter_webcontrol (feed schedule conditions / rain override / occupancy)**
+- [`matter-weather-sensor`](https://github.com/dongnh/matter-weather-sensor) — free weather API as
+  Matter temp/humidity/pressure/rain/illuminance sensors (port 8093). Rain/illuminance feed the
+  rain override.
+- [`matter-zigbee-bridge`](https://github.com/dongnh/matter-zigbee-bridge) — Zigbee devices via
+  Zigbee2MQTT → matter_webcontrol Matter sensors (bridge :8094, Z2M :8089, mosquitto :1883).
+- [`matter-mac-presence`](https://github.com/dongnh/matter-mac-presence) — Macs as occupancy
+  sensors via HID idle (port 8091); requires an uncommitted matter_webcontrol patch forwarding
+  logical-bridge occupancy over SSE.
+- [`matter-appletv-presence`](https://github.com/dongnh/matter-appletv-presence) — Apple TV "now
+  playing" as occupancy sensor via pyatv (port 8092).
+- `mac-status-bridge` — Tank + Panda online/offline as HomeKit Occupancy Sensors (port 51828).
+  *(local-only, not yet on GitHub.)*
+
+**Actuators / bridges**
+- [`yeelight_webcontrol`](https://github.com/dongnh/yeelight_webcontrol) — HTTP control for
+  Yeelight Wi-Fi bulbs; colour-flow target for rain `"effect": "flow"` (`--yeelight-server`).
+- [`light-programmer-homekit`](https://github.com/dongnh/light-programmer-homekit) — consumes
+  this package's `/mode` HTTP API to expose LP Auto / LP Kill switches in Apple Home (port 51826).
+- `matter-homekit-bridge` AC/heater stack — 3-repo group bringing HomeKit-only Aqara heaters/AC
+  into Apple Home: [`matter-homekit-bridge`](https://github.com/dongnh/matter-homekit-bridge)
+  (HomeKit accessories → matter_webcontrol logical bridge) +
+  [`matter-homekit-ac`](https://github.com/dongnh/matter-homekit-ac) (matter_webcontrol
+  thermostats → HomeKit HeaterCooler). (AC control was removed from this package's schedule loop
+  in v0.7.0.)
+
+**Host infrastructure**
+- `pyhost` — hot-reloading host that runs Python daemons (each with its own venv) under one base
+  interpreter so they share a single macOS TCC grant. Deployed on Tank (web UI :7880).
+  *(local-only, not yet on GitHub.)*

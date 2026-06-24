@@ -605,6 +605,14 @@ LIGHT entry:
     "sensor": [{"id":"dev_*","timeout":<minutes>}], OR
     "sensor_condition": <AST: AND/OR/NOT/sensor/time_window> }
   level/kelvin are linearly interpolated between schedule points (cross-midnight ok).
+  level may be fractional: 0 = off, 0 < level < 1 = MOONLIGHT (night-light channel,
+  ceiling lights + Bedside Lamp 2/3 only; nl_br = level x 100, so 0.3 -> 30%),
+  level >= 1 = normal daylight. Moonlight is OPT-IN: only a literal sub-1 setpoint
+  triggers it — interpolation ramps (0 -> daylight) and rain scaling never do. The
+  schedule loop routes the sub-1 band to the Yeelight bridge's /api/moonlight;
+  requires --yeelight-server (like rain flow). Moonlight is a fixed warm white so
+  its points may omit kelvin; if a schedule uses colour temperature, keep "kelvin"
+  on EVERY point (incl. moonlight ones) so neighbouring CT interpolation isn't blanked.
 
 AC entry (climate-driven, no schedule):
   { "id": "dev_*", "type": "ac",

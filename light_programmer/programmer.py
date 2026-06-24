@@ -32,11 +32,11 @@ sensor_registry = {}
 _flow_cfg = {"server": None, "api_key": None}
 
 
-def _flow_post(path: str, body: dict) -> None:
-    """POST a colour-flow command to the Yeelight bridge (best-effort)."""
+def _flow_post(path: str, body: dict) -> bool:
+    """POST a command to the Yeelight bridge (best-effort). True on success."""
     server = _flow_cfg.get("server")
     if not server:
-        return
+        return False
     data = json.dumps(body).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if _flow_cfg.get("api_key"):
@@ -46,8 +46,10 @@ def _flow_post(path: str, body: dict) -> None:
     try:
         with urllib.request.urlopen(req, timeout=4) as r:
             r.read()
+        return True
     except Exception as e:  # noqa: BLE001 - flow is best-effort, never block the loop
         logging.warning("flow %s failed: %s", path, e)
+        return False
 
 
 def _flow_changed(prev: dict, base: int, peak: int, kelvin: int, lightning: bool) -> bool:
@@ -102,10 +104,23 @@ def interpolate_value(current_time: int, t1: int, t2: int, v1: float, v2: float)
     ratio = (current_time - t1) / (t2 - t1)
     return v1 + (v2 - v1) * ratio
 
+def _is_moon_level(level) -> bool:
+    """A setpoint in the open (0, 1) band is an explicit moonlight request."""
+    try:
+        return 0.0 < float(level) < 1.0
+    except (TypeError, ValueError):
+        return False
+
+
 def calculate_current_state(schedule: list, current_minutes: int) -> dict:
     sorted_sched = sorted(schedule, key=lambda x: time_to_minutes(x['time']))
-    if not sorted_sched: return {"level": 0}
-    if len(sorted_sched) == 1: return sorted_sched[0]
+    if not sorted_sched: return {"level": 0, "_moon": False}
+    if len(sorted_sched) == 1:
+        only = sorted_sched[0]
+        st = {"level": only.get('level', 0), "_moon": _is_moon_level(only.get('level', 0))}
+        if 'kelvin' in only:
+            st['kelvin'] = only['kelvin']
+        return st
 
     prev_point = sorted_sched[-1]
     next_point = sorted_sched[0]
@@ -122,6 +137,11 @@ def calculate_current_state(schedule: list, current_minutes: int) -> dict:
     target_state['level'] = interpolate_value(current_minutes, t1, t2, prev_point.get('level', 0), next_point.get('level', 0))
     if 'kelvin' in prev_point and 'kelvin' in next_point:
         target_state['kelvin'] = interpolate_value(current_minutes, t1, t2, prev_point['kelvin'], next_point['kelvin'])
+    # Moonlight is OPT-IN: the segment counts as moonlight only when a bracketing
+    # setpoint is an explicit sub-1 level. Interpolation ramps between 0 and a
+    # daylight level (or rain-scaled fractions) must NOT trigger mode 5.
+    target_state['_moon'] = (_is_moon_level(prev_point.get('level', 0))
+                             or _is_moon_level(next_point.get('level', 0)))
     return target_state
 
 
@@ -320,17 +340,33 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     # Optional rain override: while a rain sensor is active, recolor/dim the
     # (already-on) device — e.g. an artificial skylight going overcast.
     rain_cfg = config.get('rain')
-    sched_level = int(target_state.get('level', 0))  # scheduled brightness before any rain override
+    sched_level = int(round(float(target_state.get('level', 0))))  # pre-override, for flow base/peak
     raining = bool(rain_cfg) and is_occupied and _rain_active(rain_cfg, now)
     intensity = _rain_intensity(rain_cfg) if raining else None
     if raining:
         _apply_rain_override(target_state, rain_cfg, intensity)
 
-    target_level = int(target_state.get('level', 0)) if is_occupied else 0
-    target_on = target_level > 0
+    # Brightness is a FLOAT. Moonlight (the night-light channel) is OPT-IN: it
+    # engages ONLY when the active schedule segment has an explicit sub-1 setpoint
+    # (target_state['_moon']). A sub-1 value that is merely an interpolation ramp
+    # (0 -> daylight) or a rain-scaled fraction is NOT moonlight — it collapses to
+    # off, exactly as the pre-moonlight int() truncation did.
+    seg_is_moon = bool(target_state.get('_moon'))
+    level_f = float(target_state.get('level', 0)) if is_occupied else 0.0
+    if not seg_is_moon and 0.0 < level_f < 1.0:
+        level_f = 0.0  # daylight ramp / rain fraction below 1% -> off (legacy behaviour)
+    is_moon = seg_is_moon and 0.0 < level_f < 1.0
+    if is_moon and not _flow_cfg.get('server'):
+        # Moonlight needs the direct Yeelight channel (--yeelight-server); without
+        # it, fall back to the lowest normal level so the light still turns on.
+        is_moon = False
+        level_f = 1.0
+    target_on = level_f > 0
+    target_level = int(round(level_f))  # daylight 0-100 (>= 1 only)
 
     prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1,
-                                          'rain': False, 'flow': None, 'flow_active': False})
+                                          'rain': False, 'flow': None, 'flow_active': False,
+                                          'moon': None})
     rain_tag = (intensity or "on") if raining else False
     if prev.get('rain') != rain_tag:
         logging.info("[" + device.name + "] RAIN " + (str(rain_tag) if raining else "off"))
@@ -351,6 +387,7 @@ def _apply_light(config, device, now, current_minutes, state_cache):
             prev['flow'] = {'base': base, 'peak': peak, 'kelvin': kelvin, 'lightning': lightning}
             prev['flow_active'] = True
             prev['state'], prev['level'], prev['kelvin'] = 'ON', -1, -1  # flow owns the bulb
+            prev['moon'] = None  # flow took the bulb off the night-light channel
             logging.info("[%s] FLOW %s base=%d peak=%d%s", device.name, intensity,
                          base, peak, " +lightning" if lightning else "")
         state_cache[config['id']] = prev
@@ -361,9 +398,29 @@ def _apply_light(config, device, now, current_minutes, state_cache):
         _flow_post('/api/flow/stop', {'id': config['id']})
         prev['flow_active'], prev['flow'] = False, None
         prev['state'], prev['level'], prev['kelvin'] = None, -1, -1  # force schedule re-apply
+        prev['moon'] = None  # force a fresh moonlight re-apply if still in the band
         logging.info("[%s] FLOW stopped", device.name)
 
-    if target_on:
+    if target_on and is_moon:
+        # Sub-1 schedule level -> moonlight channel. Drive the Yeelight bridge
+        # directly (like flow); nl_br = level x 100 (0.1 -> 10%, 0.9 -> 90%).
+        nl = max(1, min(100, int(round(level_f * 100))))
+        if prev.get('moon') != nl:
+            if _flow_post('/api/moonlight', {'id': config['id'], 'on': True, 'level': nl}):
+                logging.info("[%s] MOONLIGHT %d%%", device.name, nl)
+                prev['moon'] = nl
+                prev['state'] = 'ON'
+                prev['level'] = -1   # force daylight re-apply when leaving moonlight
+                prev['kelvin'] = -1
+            # else: POST failed -> leave prev['moon'] so the next tick retries
+    elif target_on:
+        if prev.get('moon'):
+            # Leaving moonlight: the bridge's /api/level resets NORMAL mode for
+            # night-light-capable bulbs, so just force a level re-apply here.
+            prev['moon'] = None
+            prev['level'] = -1
+            prev['kelvin'] = -1
+
         matter_level = int((target_level / 100.0) * 254)
 
         if prev['state'] != 'ON':
@@ -390,6 +447,7 @@ def _apply_light(config, device, now, current_minutes, state_cache):
             device.turn_off()
             prev['state'] = 'OFF'
             prev['level'] = 0
+        prev['moon'] = None
 
     state_cache[config['id']] = prev
 
