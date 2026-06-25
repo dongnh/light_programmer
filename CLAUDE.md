@@ -83,29 +83,20 @@ sample.json                    # Real-world config example with 11 devices
     dedicated `rain_state: "rain"` key (Matter Rain Sensor 0x0044) and streams `rain_intensity`
     in its SSE; the callback reads `rain`/`occupancy` (binary) and stores the latest intensity,
     so the override dims an artificial skylight in step with how hard it's raining.
-  - **Colour-flow effect (v0.12.0)**: a rain entry with `"effect": "flow"` offloads an
-    on-device flicker animation to the Yeelight bridge instead of the 1Hz static-level control.
-    While raining + on, the loop POSTs `/api/flow {id, base, peak, kelvin, lightning}` to the
-    Yeelight bridge (`--yeelight-server`); `base` = scheduled level × `intensity_scale`, `peak`
-    = full scheduled level, `lightning` true when `intensity` ∈ `flash_levels` (default
-    `["violent"]`). While flow is active the bulb is owned by the bridge — static level/temp
-    control is skipped and the state cache is poisoned (`level=-1`) so it re-applies on stop.
-    When rain clears / light turns off / effect is removed, the loop POSTs `/api/flow/stop`.
-    Flow is best-effort: bridge errors are logged and never block the loop. See
-    `_flow_post`/`_flow_changed` in [programmer.py](light_programmer/programmer.py:31).
-- **Moonlight / night-light channel (v0.13.0)**: a schedule `level` is now a FLOAT. `0` = off,
-  `level >= 1` = normal daylight (the old 0–100 scale), and a literal `0 < level < 1` setpoint =
-  MOONLIGHT — route the bulb to its physical night-light channel via the Yeelight bridge's
-  `POST /api/moonlight {id, on, level}` (`nl_br = level × 100`, so `0.3` → 30%). Only ceiling
-  lights + Bedside Lamp 2/3 have the channel; the bridge falls back to the lowest normal
-  brightness otherwise. Moonlight is **opt-in**: only an explicit sub-1 setpoint in a bracketing
-  schedule point triggers it (`target_state['_moon']`); a sub-1 value that is merely an
+- **Moonlight / night-light channel (v0.13.0; transport reworked v0.19.0)**: a schedule `level`
+  is a FLOAT. `0` = off, `level >= 1` = normal daylight (the old 0–100 scale), and a literal
+  `0 < level < 1` setpoint = MOONLIGHT. As of v0.19.0 the schedule loop no longer talks to the
+  Yeelight bridge directly: moonlight is sent through the normal Matter path as the **reserved
+  raw level `1`** (daylight therefore uses raw `2`–`254`), and the **Yeelight bridge maps raw `1`
+  to the physical night-light channel** (ceiling lights + Bedside Lamp 2/3; non-capable bulbs fall
+  back to the lowest normal brightness). The fraction is now only an on/off flag — it no longer
+  sets the night-light brightness. Moonlight is **opt-in**: only an explicit sub-1 setpoint in a
+  bracketing schedule point triggers it (`target_state['_moon']`); a sub-1 value that is merely an
   interpolation ramp (0 → daylight) or a rain-scaled fraction collapses to OFF, exactly like the
-  pre-moonlight `int()` truncation. Needs `--yeelight-server` (like rain flow); without it,
-  moonlight falls back to the lowest normal level so the light still turns on. Moonlight is a
-  fixed warm white, so its points may omit `kelvin` — but if a schedule uses colour temperature,
-  keep `kelvin` on EVERY point (incl. the moonlight ones) so neighbouring CT interpolation isn't
-  blanked. See `_is_moon_level` / `_apply_light` in [programmer.py](light_programmer/programmer.py:107).
+  pre-moonlight `int()` truncation. CT is skipped while in moonlight (it's a fixed warm white, and
+  writing colour temp would leave the channel); moonlight points may omit `kelvin` — but if a
+  schedule uses colour temperature, keep `kelvin` on EVERY non-moonlight point so neighbouring CT
+  interpolation isn't blanked. See `_is_moon_level` / `_apply_light` in [programmer.py](light_programmer/programmer.py:107).
 - **CommandDispatcher**: Queues commands to avoid flooding the controller. Rate-limited background thread.
 - **State caching**: Only sends commands when target differs from cached state (brightness ±2,
   color temp >50K threshold).
@@ -139,8 +130,15 @@ light-programmer --server <IP:PORT> --config config.json [--api-key <KEY>]
   (`/mode`, `/kill`, `/lights`). Unset = unauthenticated (fine for loopback); strongly
   recommended when `--mode-http-host 0.0.0.0`. The HomeKit bridge must send a matching
   `programmer_api_key`. A non-loopback bind with no key logs a startup WARNING.
-- `--yeelight-server IP:PORT` / `LP_YEELIGHT_SERVER` and `--yeelight-api-key` / `LP_YEELIGHT_KEY`
-  — only needed when a config uses rain `"effect": "flow"`. Optional.
+- `--time-scale N` / `LP_TIME_SCALE` and `--time-start HH:MM` / `LP_TIME_START` — **Test Mode**
+  (v0.20.0). `N > 1` accelerates the loop's virtual clock so a full day's circadian + moonlight
+  transitions play out fast (`100` ≈ a day in ~14 min); `--time-start` sets the virtual start
+  time-of-day (default: now) to jump straight to, e.g., the evening moonlight window. Default
+  `N = 1` is real time. The virtual clock (`_now()`) drives BOTH the schedule loop and the sensor
+  callback, so occupancy grace-period timeouts accelerate consistently; while a sensor is actively
+  occupied it stays occupied regardless of scale. The real sleep cadence is unchanged (~1 Hz) —
+  only the time fed to the schedule advances faster. NOT for production; logs `[TEST] virtual
+  time …` each tick. See `_now` / `_init_clock` in [programmer.py](light_programmer/programmer.py:33).
 
 ## Dependencies
 
@@ -207,7 +205,8 @@ infrastructure. All push to `github.com/dongnh`. Most run as launchd services on
 
 **Actuators / bridges**
 - [`yeelight_webcontrol`](https://github.com/dongnh/yeelight_webcontrol) — HTTP control for
-  Yeelight Wi-Fi bulbs; colour-flow target for rain `"effect": "flow"` (`--yeelight-server`).
+  Yeelight Wi-Fi bulbs (incl. the moonlight night-light channel via the reserved level `1`),
+  reached through matter_webcontrol's logical bridge — light_programmer no longer talks to it directly.
 - [`light-programmer-homekit`](https://github.com/dongnh/light-programmer-homekit) — consumes
   this package's `/mode` HTTP API to expose LP Auto / LP Kill switches in Apple Home (port 51826).
 - `matter-homekit-bridge` AC/heater stack — 3-repo group bringing HomeKit-only Aqara heaters/AC

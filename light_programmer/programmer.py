@@ -8,7 +8,6 @@ import argparse
 import logging
 import sys
 import queue
-import urllib.request
 from datetime import datetime, timedelta
 
 from .matter_lib import (
@@ -29,38 +28,39 @@ logging.basicConfig(
 # Global sensor state and event trigger
 sensor_registry = {}
 
-# Optional Yeelight colour-flow endpoint (for rain "effect": "flow" lights).
-_flow_cfg = {"server": None, "api_key": None}
-
-
-def _flow_post(path: str, body: dict) -> bool:
-    """POST a command to the Yeelight bridge (best-effort). True on success."""
-    server = _flow_cfg.get("server")
-    if not server:
-        return False
-    data = json.dumps(body).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if _flow_cfg.get("api_key"):
-        headers["X-API-Key"] = _flow_cfg["api_key"]
-    req = urllib.request.Request("http://" + server + path, data=data,
-                                 headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=4) as r:
-            r.read()
-        return True
-    except Exception as e:  # noqa: BLE001 - flow is best-effort, never block the loop
-        logging.warning("flow %s failed: %s", path, e)
-        return False
-
-
-def _flow_changed(prev: dict, base: int, peak: int, kelvin: int, lightning: bool) -> bool:
-    """True if the flow needs (re)sending: not active, or params drifted enough."""
-    f = prev.get("flow")
-    if not prev.get("flow_active") or not f:
-        return True
-    return (abs(f["base"] - base) >= 3 or abs(f["peak"] - peak) >= 3
-            or f["kelvin"] != kelvin or f["lightning"] != lightning)
 state_changed_event = threading.Event()
+
+# Virtual clock for Test Mode. With scale > 1 the loop's notion of "now" advances
+# that many times faster than the wall clock, so a full day's circadian schedule
+# (and the night-light/moonlight transitions) plays out in minutes. scale == 1.0
+# is real time — the production default. Both the schedule loop AND the sensor
+# callback read _now(), so occupancy grace-period timeouts stay on the same clock.
+_clock = {"scale": 1.0, "t0_real": None, "t0_virtual": None}
+
+
+def _now() -> datetime:
+    """Current time, accelerated by Test Mode when scale != 1 (else wall clock)."""
+    if _clock["scale"] == 1.0 or _clock["t0_real"] is None:
+        return datetime.now()
+    elapsed = (datetime.now() - _clock["t0_real"]).total_seconds()
+    return _clock["t0_virtual"] + timedelta(seconds=elapsed * _clock["scale"])
+
+
+def _init_clock(scale: float = 1.0, start: str = None) -> None:
+    """Anchor the Test-Mode clock. `scale` > 1 accelerates virtual time; `start`
+    (HH:MM) sets the virtual start time-of-day so a test can jump straight to,
+    e.g., the evening moonlight window. Default = real time, starting now."""
+    scale = float(scale)
+    if scale <= 0:
+        raise ValueError("--time-scale must be > 0 (got %r)" % scale)
+    _clock["scale"] = scale
+    _clock["t0_real"] = datetime.now()
+    if start:
+        hh, mm = (int(x) for x in start.split(":"))
+        _clock["t0_virtual"] = _clock["t0_real"].replace(
+            hour=hh, minute=mm, second=0, microsecond=0)
+    else:
+        _clock["t0_virtual"] = _clock["t0_real"]
 
 
 class CommandDispatcher:
@@ -203,7 +203,7 @@ def create_sensor_callback(sensor_id: str):
                 state_mutated = True
             elif occupancy == 0 and current_state["is_occupied"]:
                 current_state["is_occupied"] = False
-                current_state["last_cleared"] = datetime.now()
+                current_state["last_cleared"] = _now()
                 state_mutated = True
             elif occupancy == 0 and sensor_id not in sensor_registry:
                 current_state["is_occupied"] = False
@@ -366,11 +366,10 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     # Rain override must never turn a light ON: gate on the SCHEDULED level
     # being > 0 so an absolute rain form (`level`/`intensity_level`) can't write
     # a non-zero brightness onto a scheduled-OFF light. (Multiplicative forms
-    # already collapse to 0; gating here also skips the colour-temp/flow/
+    # already collapse to 0; gating here also skips the colour-temp/
     # moonlight branches for a scheduled-off light.) A moonlight setpoint
     # (0<level<1) counts as on, so a moonlit skylight can still be recoloured.
     rain_cfg = config.get('rain')
-    sched_level = int(round(float(target_state.get('level', 0))))  # pre-override, for flow base/peak
     raining = (bool(rain_cfg) and is_occupied
                and float(target_state.get('level', 0)) > 0
                and _rain_active(rain_cfg, now))
@@ -398,84 +397,43 @@ def _apply_light(config, device, now, current_minutes, state_cache):
     if not seg_is_moon and 0.0 < level_f < 1.0:
         level_f = 0.0  # daylight ramp / rain fraction below 1% -> off (legacy behaviour)
     is_moon = seg_is_moon and 0.0 < level_f < 1.0
-    if is_moon and not _flow_cfg.get('server'):
-        # Moonlight needs the direct Yeelight channel (--yeelight-server); without
-        # it, fall back to the lowest normal level so the light still turns on.
-        is_moon = False
-        level_f = 1.0
     target_on = level_f > 0
-    target_level = int(round(level_f))  # daylight 0-100 (>= 1 only)
+    # Moonlight rides the standard level path as the reserved raw value 1; the
+    # Yeelight bridge maps raw 1 -> the night-light channel for capable models
+    # (lowest normal brightness otherwise). Daylight uses the 0-254 scale (raw>=2).
+    matter_level = 1 if is_moon else int((level_f / 100.0) * 254)
 
     prev = state_cache.get(config['id'], {'state': None, 'level': -1, 'kelvin': -1,
-                                          'rain': False, 'flow': None, 'flow_active': False,
-                                          'moon': None})
+                                          'rain': False, 'moon': False})
     rain_tag = (intensity or "on") if raining else False
     if prev.get('rain') != rain_tag:
         logging.info("[" + device.name + "] RAIN " + (str(rain_tag) if raining else "off"))
         prev['rain'] = rain_tag
 
-    # Colour-flow effect (Yeelight on-device animation) — opt-in per rain entry.
-    # Brightness stays synced to the schedule: base = scheduled x intensity_scale
-    # (already in target_level), peak = the full scheduled level.
-    use_flow = (raining and target_on and (rain_cfg or {}).get('effect') == 'flow'
-                and _flow_cfg.get('server'))
-    if use_flow:
-        base, peak = target_level, sched_level
-        kelvin = int(rain_cfg.get('kelvin', 4500))
-        lightning = intensity in rain_cfg.get('flash_levels', ['violent'])
-        if _flow_changed(prev, base, peak, kelvin, lightning):
-            _flow_post('/api/flow', {'id': config['id'], 'base': base, 'peak': peak,
-                                     'kelvin': kelvin, 'lightning': lightning})
-            prev['flow'] = {'base': base, 'peak': peak, 'kelvin': kelvin, 'lightning': lightning}
-            prev['flow_active'] = True
-            prev['state'], prev['level'], prev['kelvin'] = 'ON', -1, -1  # flow owns the bulb
-            prev['moon'] = None  # flow took the bulb off the night-light channel
-            logging.info("[%s] FLOW %s base=%d peak=%d%s", device.name, intensity,
-                         base, peak, " +lightning" if lightning else "")
-        state_cache[config['id']] = prev
-        return  # flow drives the bulb; skip static level/temp control this tick
-
-    if prev.get('flow_active'):
-        # Flow should stop (rain cleared, light off, or effect disabled).
-        _flow_post('/api/flow/stop', {'id': config['id']})
-        prev['flow_active'], prev['flow'] = False, None
-        prev['state'], prev['level'], prev['kelvin'] = None, -1, -1  # force schedule re-apply
-        prev['moon'] = None  # force a fresh moonlight re-apply if still in the band
-        logging.info("[%s] FLOW stopped", device.name)
-
-    if target_on and is_moon:
-        # Sub-1 schedule level -> moonlight channel. Drive the Yeelight bridge
-        # directly (like flow); nl_br = level x 100 (0.1 -> 10%, 0.9 -> 90%).
-        nl = max(1, min(100, int(round(level_f * 100))))
-        if prev.get('moon') != nl:
-            if _flow_post('/api/moonlight', {'id': config['id'], 'on': True, 'level': nl}):
-                logging.info("[%s] MOONLIGHT %d%%", device.name, nl)
-                prev['moon'] = nl
-                prev['state'] = 'ON'
-                prev['level'] = -1   # force daylight re-apply when leaving moonlight
-                prev['kelvin'] = -1
-            # else: POST failed -> leave prev['moon'] so the next tick retries
-    elif target_on:
-        if prev.get('moon'):
-            # Leaving moonlight: the bridge's /api/level resets NORMAL mode for
-            # night-light-capable bulbs, so just force a level re-apply here.
-            prev['moon'] = None
-            prev['level'] = -1
-            prev['kelvin'] = -1
-
-        matter_level = int((target_level / 100.0) * 254)
-
+    if target_on:
+        was_moon = prev.get('moon', False)
         if prev['state'] != 'ON':
             logging.info("[" + device.name + "] TURN ON")
             device.turn_on()
             prev['state'] = 'ON'
 
-        if abs(prev['level'] - matter_level) >= 2:
-            logging.info("[" + device.name + "] Level: " + str(matter_level))
+        # Entering or leaving moonlight forces a level re-apply: the moonlight
+        # sentinel (raw 1) and the lowest daylight level (raw 2) differ by less
+        # than the +-2 cache threshold, so the numeric check alone would miss it.
+        if was_moon != is_moon or abs(prev['level'] - matter_level) >= 2:
+            if is_moon:
+                logging.info("[%s] MOONLIGHT (level 1)", device.name)
+            else:
+                logging.info("[%s] Level: %d", device.name, matter_level)
             device.set_level(matter_level)
             prev['level'] = matter_level
+        if was_moon and not is_moon:
+            prev['kelvin'] = -1  # left moonlight -> force a fresh CT re-apply
+        prev['moon'] = is_moon
 
-        if 'kelvin' in target_state:
+        # Colour temperature only in daylight; moonlight is a fixed warm white and
+        # writing CT would pull the bulb off the night-light channel.
+        if not is_moon and 'kelvin' in target_state:
             kelvin = int(target_state['kelvin'])
             mireds = int(1000000 / kelvin) if kelvin > 0 else 250
 
@@ -489,7 +447,7 @@ def _apply_light(config, device, now, current_minutes, state_cache):
             device.turn_off()
             prev['state'] = 'OFF'
             prev['level'] = 0
-        prev['moon'] = None
+        prev['moon'] = False
 
     state_cache[config['id']] = prev
 
@@ -537,12 +495,11 @@ def run_automation(server: str, config_path: str, api_key: str = None,
                    mode_http_host: str = "127.0.0.1",
                    mode_http_port: int = 7870,
                    mode_http_key: str = None,
-                   yeelight_server: str = None,
-                   yeelight_api_key: str = None):
-    _flow_cfg["server"] = yeelight_server
-    _flow_cfg["api_key"] = yeelight_api_key
-    if yeelight_server:
-        logging.info("Yeelight colour-flow endpoint: %s", yeelight_server)
+                   time_scale: float = 1.0, time_start: str = None):
+    _init_clock(time_scale, time_start)
+    if time_scale != 1.0:
+        logging.warning("TEST MODE: clock accelerated %gx (virtual start %s) — NOT for production",
+                        time_scale, _clock["t0_virtual"].strftime("%H:%M"))
     dispatcher = CommandDispatcher(rate_limit_delay=0.0)
     controller = MatterController(server_address=server, api_key=api_key)
 
@@ -637,7 +594,7 @@ def run_automation(server: str, config_path: str, api_key: str = None,
             mode = mode_state.load(mode_state_path) if mode_state_path else mode_state.DEFAULT
             kill = mode["kill"]
             auto = mode["auto"]
-            now = datetime.now()
+            now = _now()
 
             if kill and not prev_kill:
                 logging.warning("KILL switch engaged — turning all devices off")
@@ -655,6 +612,9 @@ def run_automation(server: str, config_path: str, api_key: str = None,
                 continue
 
             current_minutes = now.hour * 60 + now.minute
+            if _clock["scale"] != 1.0:
+                logging.info("[TEST] virtual time %s (%gx)",
+                             now.strftime("%H:%M:%S"), _clock["scale"])
 
             for config in configs:
                 device_id = config['id']
@@ -686,11 +646,16 @@ def main():
                         help="X-API-Key required on the mode HTTP server (/mode, /kill, "
                              "/lights). Unset = unauthenticated; recommended when binding "
                              "non-loopback. Or set LP_MODE_HTTP_KEY.")
-    parser.add_argument("--yeelight-server", default=os.environ.get("LP_YEELIGHT_SERVER"),
-                        help="Yeelight bridge IP:PORT for rain 'effect: flow' colour-flow "
-                             "animations (e.g. 127.0.0.1:9800). Optional.")
-    parser.add_argument("--yeelight-api-key", default=os.environ.get("LP_YEELIGHT_KEY"),
-                        help="X-API-Key for the Yeelight bridge, if it requires one.")
+    parser.add_argument("--time-scale", type=float,
+                        default=float(os.environ.get("LP_TIME_SCALE", "1")),
+                        help="TEST MODE: accelerate the clock by this factor so a full "
+                             "day's circadian + moonlight transitions play out fast "
+                             "(e.g. 100 = a day in ~14 min). Default 1 = real time. "
+                             "Or set LP_TIME_SCALE.")
+    parser.add_argument("--time-start", default=os.environ.get("LP_TIME_START"),
+                        help="TEST MODE: virtual start time-of-day HH:MM (default: now). "
+                             "Pair with --time-scale to jump to e.g. 22:00 and watch the "
+                             "night. Or set LP_TIME_START.")
     args = parser.parse_args()
 
     try:
@@ -699,8 +664,7 @@ def main():
                        mode_http_host=args.mode_http_host,
                        mode_http_port=args.mode_http_port,
                        mode_http_key=args.mode_http_key,
-                       yeelight_server=args.yeelight_server,
-                       yeelight_api_key=args.yeelight_api_key)
+                       time_scale=args.time_scale, time_start=args.time_start)
     except KeyboardInterrupt:
         logging.info("System halted.")
         sys.exit(0)
