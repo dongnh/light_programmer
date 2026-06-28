@@ -200,6 +200,10 @@ infrastructure. All push to `github.com/dongnh`. Most run as launchd services on
   logical-bridge occupancy over SSE.
 - [`matter-appletv-presence`](https://github.com/dongnh/matter-appletv-presence) — Apple TV "now
   playing" as occupancy sensor via pyatv (port 8092).
+- [`matter-walkingpad-presence`](https://github.com/dongnh/matter-walkingpad-presence) — a Kingsmith
+  WalkingPad treadmill as an occupancy sensor: present while it advertises over BLE (powered on);
+  passive scan only, never connects (port 8095). Gates the office skylights' OCCUPIED state like
+  being at Tank.
 - `mac-status-bridge` — Tank + Panda online/offline as HomeKit Occupancy Sensors (port 51828).
   *(local-only, not yet on GitHub.)*
 
